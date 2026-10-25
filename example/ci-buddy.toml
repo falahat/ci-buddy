@@ -1,0 +1,5 @@
+name = "example"
+host = ""
+main = "main"
+image = ["Containerfile"]
+test = "cargo nextest run --workspace --locked --no-tests fail"

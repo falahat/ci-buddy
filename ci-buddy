@@ -1,0 +1,98 @@
+set -euo pipefail
+if [[ ${1:-} != --server ]]; then
+    cd "$(git rev-parse --show-toplevel)"
+    while IFS= read -r line; do
+        if [[ $line =~ ^(name|host|main)[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+            printf -v "${BASH_REMATCH[1]}" '%s' "${BASH_REMATCH[2]}"
+        fi
+    done <ci-buddy.toml
+    : "${name:?}" "${host:?}" "${main:?}"
+    [[ $name =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
+    command=${1:?command required}; shift
+    remote() { ssh "$host" "bash ~/.ci-buddy/bin/ci-buddy --server $(printf '%q ' "$name" "$@")"; }
+    case $command in
+        status|log|cancel) remote "$command" "$@"; exit $? ;;
+        run|test) ;;
+        *) echo "expected run, test, status, log or cancel" >&2; exit 2 ;;
+    esac
+    candidate=$(git rev-parse HEAD)
+    changed=0
+    git diff --quiet HEAD -- || changed=$?
+    case $changed in
+        0) ;;
+        1) candidate=$(git stash create); [[ -n $candidate ]] || exit 1 ;;
+        *) exit "$changed" ;;
+    esac
+    main_ref=$(git rev-parse --quiet --verify "origin/$main" || git rev-parse --verify "$main")
+    base=$(git merge-base "$candidate" "$main_ref")
+    branch=$(git symbolic-ref --short HEAD)
+    run=$((${EPOCHREALTIME/./} * 1000 + RANDOM % 1000))
+    remote init
+    git push --quiet --no-verify "$host:.ci-buddy/projects/$name/git" "$candidate:refs/ci-buddy/$run"
+    remote submit "$run" "$command" "$candidate" "$base" "$branch" "${CI_BUDDY_SUBMITTER:-$HOSTNAME}" "$@"
+    exit $?
+fi
+shift
+project=${1:?project required}; command=${2:?command required}; shift 2
+[[ $project =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
+root=$(cd "$(dirname "$0")/.." && pwd -P)
+export PATH="$root/bin:$PATH"
+export PUEUE_CONFIG_PATH="$root/pueue.yml"
+data=$root/bin/data.py
+folder=$root/projects/$project
+case $command in
+    init)
+        mkdir -p "$folder"/{slots,data,secrets,runs,logs}
+        chmod 700 "$folder/secrets"
+        [[ -d $folder/git ]] || git init --quiet --bare "$folder/git"
+        ;;
+    submit)
+        run=$1; shift
+        [[ $run =~ ^[0-9]+$ ]] || exit 2
+        mkdir "$folder/runs/$run"
+        python3 "$data" job "$folder" "$run" "$@"
+        id=$(pueue add --print-task-id --group jobs --label "$project/$run" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run")
+        echo "$id" >"$folder/runs/$run/task"
+        echo "run=$run task=$id"
+        pueue follow "$id" || true
+        if ! pueue wait --quiet "$id"; then
+            [[ -f $folder/runs/$run/exit ]] || exit 1
+        fi
+        if [[ ! -f $folder/runs/$run/exit ]]; then
+            podman wait "ci-buddy-$run" || podman wait "ci-buddy-fetch-$run" || true
+            python3 "$data" report "$folder/runs/$run"
+            echo 137 >"$folder/runs/$run/exit"
+        fi
+        exit "$(<"$folder/runs/$run/exit")"
+        ;;
+    status)
+        pueue status
+        git -C "$folder/git" for-each-ref --format='%(refname:short) %(objectname:short)' refs/slots
+        ;;
+    log|cancel)
+        run=${1:?run required}
+        [[ $run =~ ^[0-9]+$ ]] || exit 2
+        if [[ $command == log ]]; then
+            pueue log "$(<"$folder/runs/$run/task")"
+        else
+            [[ ! -f $folder/runs/$run/exit ]] || exit 0
+            task=$(pueue status --json | python3 "$data" task "$project/$run")
+            stop_container() {
+                for container in "ci-buddy-$run" "ci-buddy-fetch-$run"; do
+                    if podman container exists "$container"; then podman kill "$container"; return; fi
+                done
+                return 1
+            }
+            if stop_container; then
+                :
+            elif [[ -n $task ]] && pueue remove "$task"; then
+                echo 137 >"$folder/runs/$run/exit"
+                echo 'cancelled before start; stats incomplete' >"$folder/runs/$run/report.txt"
+            elif [[ -n $task ]]; then
+                pueue kill "$task"
+                stop_container || true
+            fi
+        fi
+        ;;
+    *) echo "unknown server command: $command" >&2; exit 2 ;;
+esac

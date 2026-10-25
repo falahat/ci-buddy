@@ -1,0 +1,3 @@
+[workspace]
+members = ["arithmetic"]
+resolver = "3"

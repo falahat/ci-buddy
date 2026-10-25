@@ -1,0 +1,6 @@
+FROM docker.io/library/rust:1.99.0-slim
+RUN apt-get update && apt-get install -y build-essential pkg-config libssl-dev git python3
+RUN cargo install --locked sccache --version 0.18.0 && \
+    cargo install --locked cargo-nextest --version 0.9.146 && \
+    cargo install --locked cargo-sweep --version 0.8.0
+WORKDIR /work/src
