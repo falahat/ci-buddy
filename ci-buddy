@@ -12,8 +12,21 @@ if [[ ${1:-} != --server ]]; then
     remote() { ssh "$host" "bash ~/.ci-buddy/bin/ci-buddy --server $(printf '%q ' "$name" "$@")"; }
     case $command in
         status|log|cancel) remote "$command" "$@"; exit $? ;;
-        run|test) ;;
-        *) echo "expected run, test, status, log or cancel" >&2; exit 2 ;;
+        verify) remote verify "$(git rev-parse "${1:?commit required}")"; exit $? ;;
+        merge)
+            git diff --quiet HEAD -- || { echo 'commit tracked edits before merge' >&2; exit 1; }
+            candidate=$(git rev-parse HEAD)
+            result=$(remote verify "$candidate") || { printf '%s\n' "$result"; exit 1; }
+            printf '%s\n' "$result"
+            verified=${result##*$'\n'}
+            [[ $verified =~ ^verified=$candidate\ base=([0-9a-f]+)$ ]] || exit 1
+            expected=${BASH_REMATCH[1]}
+            current=$(git ls-remote origin "refs/heads/$main")
+            [[ $current == "$expected"$'\t'* ]] || { echo 'main moved; integrate it and gate again' >&2; exit 1; }
+            git push origin "$candidate:refs/heads/$main"
+            exit $? ;;
+        run|test|gate) ;;
+        *) echo "expected run, test, gate, verify, merge, status, log or cancel" >&2; exit 2 ;;
     esac
     candidate=$(git rev-parse HEAD)
     changed=0
@@ -40,6 +53,16 @@ export PATH="$root/bin:$PATH"
 export PUEUE_CONFIG_PATH="$root/pueue.yml"
 data=$root/bin/data.py
 folder=$root/projects/$project
+wait_task() {
+    local id=$1 prefix=${2:-}
+    [[ ! -f $folder/runs/$run/${prefix}exit ]] || return 0
+    pueue wait --quiet "$id" || true
+    if [[ ! -f $folder/runs/$run/${prefix}exit ]]; then
+        podman wait "ci-buddy-$run" || podman wait "ci-buddy-fetch-$run" || true
+        python3 "$data" report "$folder/runs/$run" "$prefix"
+        echo 137 >"$folder/runs/$run/${prefix}exit"
+    fi
+}
 case $command in
     init)
         mkdir -p "$folder"/{slots,data,secrets,runs,logs}
@@ -50,20 +73,31 @@ case $command in
         run=$1; shift
         [[ $run =~ ^[0-9]+$ ]] || exit 2
         mkdir "$folder/runs/$run"
-        python3 "$data" job "$folder" "$run" "$@"
-        id=$(pueue add --print-task-id --group jobs --label "$project/$run" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run")
+        group=$(python3 "$data" job "$folder" "$run" "$@")
+        id=$(pueue add --stashed --print-task-id --group "$group" --label "$project/$run" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run")
         echo "$id" >"$folder/runs/$run/task"
+        pueue enqueue "$id"
         echo "run=$run task=$id"
         pueue follow "$id" || true
-        if ! pueue wait --quiet "$id"; then
-            [[ -f $folder/runs/$run/exit ]] || exit 1
-        fi
-        if [[ ! -f $folder/runs/$run/exit ]]; then
-            podman wait "ci-buddy-$run" || podman wait "ci-buddy-fetch-$run" || true
-            python3 "$data" report "$folder/runs/$run"
-            echo 137 >"$folder/runs/$run/exit"
-        fi
+        wait_task "$id"
         exit "$(<"$folder/runs/$run/exit")"
+        ;;
+    verify)
+        commit=${1:?commit required}
+        run=$(python3 "$data" gate "$folder" "$commit")
+        out=$folder/runs/$run
+        wait_task "$(<"$out/task")"
+        if [[ -f $out/bench-task ]]; then
+            [[ -f $out/bench-exit ]] || echo "waiting bench_task=$(<"$out/bench-task")"
+            wait_task "$(<"$out/bench-task")" bench-
+        fi
+        cat "$out/report.txt"
+        values=$(python3 "$data" load "$out" ""); eval "$values"
+        [[ $(<"$out/exit") == 0 ]] || exit 1
+        if [[ $bench_required == True ]]; then
+            [[ -f $out/bench-exit && $(<"$out/bench-exit") == 0 ]] || exit 1
+        fi
+        echo "verified=$commit base=$base"
         ;;
     status)
         pueue status
@@ -73,10 +107,14 @@ case $command in
         run=${1:?run required}
         [[ $run =~ ^[0-9]+$ ]] || exit 2
         if [[ $command == log ]]; then
-            pueue log "$(<"$folder/runs/$run/task")"
+            ids=("$(<"$folder/runs/$run/task")")
+            [[ ! -f $folder/runs/$run/bench-task ]] || ids+=("$(<"$folder/runs/$run/bench-task")")
+            pueue log "${ids[@]}"
         else
-            [[ ! -f $folder/runs/$run/exit ]] || exit 0
-            task=$(pueue status --json | python3 "$data" task "$project/$run")
+            prefix=""; [[ ! -f $folder/runs/$run/bench-task ]] || prefix=bench-
+            [[ ! -f $folder/runs/$run/${prefix}exit ]] || exit 0
+            label="$project/$run"; [[ -z $prefix ]] || label="$label/bench"
+            task=$(pueue status --json | python3 "$data" task "$label")
             stop_container() {
                 for container in "ci-buddy-$run" "ci-buddy-fetch-$run"; do
                     if podman container exists "$container"; then podman kill "$container"; return; fi
@@ -86,8 +124,8 @@ case $command in
             if stop_container; then
                 :
             elif [[ -n $task ]] && pueue remove "$task"; then
-                echo 137 >"$folder/runs/$run/exit"
-                echo 'cancelled before start; stats incomplete' >"$folder/runs/$run/report.txt"
+                echo 137 >"$folder/runs/$run/${prefix}exit"
+                echo 'cancelled before start; stats incomplete' >>"$folder/runs/$run/report.txt"
             elif [[ -n $task ]]; then
                 pueue kill "$task"
                 stop_container || true

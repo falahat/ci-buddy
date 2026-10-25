@@ -5,15 +5,23 @@ export PUEUE_CONFIG_PATH="$root/pueue.yml"
 export TMPDIR="$root/containers"
 folder=$root/projects/$project
 out=$folder/runs/$run
+prefix=""; [[ ${4:-} != bench ]] || prefix=bench-
 values=$(python3 "$root/bin/data.py" host "$root"); eval "$values"
-values=$(python3 "$root/bin/data.py" load "$out"); eval "$values"
+values=$(python3 "$root/bin/data.py" load "$out" "${4:-}"); eval "$values"
 started=$EPOCHREALTIME
-python3 "$root/bin/data.py" start "$out" "$started"
+started_field=started_at; [[ $kind != bench ]] || started_field=bench_started_at
+python3 "$root/bin/data.py" stamp "$out" "$started_field" "$started"
 finish() {
     status=$?
-    python3 "$root/bin/data.py" report "$out" "$started" "$EPOCHREALTIME" "$status"
+    python3 "$root/bin/data.py" report "$out" "$prefix" "$started" "$EPOCHREALTIME" "$status"
+    if [[ $status == 0 && $kind == gate && -n ${bench:-} ]]; then
+        python3 "$root/bin/data.py" stamp "$out" bench_queued_at "$EPOCHREALTIME"
+        id=$(pueue add --print-task-id --group exclusive --after "$(<"$out/task")" --label "$project/$run/bench" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run" bench)
+        echo "$id" >"$out/bench-task"
+        echo "bench_task=$id"
+    fi
     cat "$out/report.txt"
-    echo "$status" >"$out/exit"
+    echo "$status" >"$out/${prefix}exit"
 }
 trap finish EXIT
 free=$(df --output=avail -B1 "$root" | tail -1)
@@ -42,7 +50,8 @@ git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
 mkdir -p "$root/cargo"/{registry,git} "$root/sccache" "$slot/context"
 values=$(python3 "$root/bin/data.py" image "$slot/src" "$slot/context" "$project"); eval "$values"
 exec 6>"$root/turnstile" 4>"$root/machine.lock"
-flock -x 6; flock -s 4; flock -u 6
+lock_mode=-s; [[ $exclusive != True ]] || lock_mode=-x
+flock -x 6; flock "$lock_mode" 4; flock -u 6
 exec 7>"$root/containers/$image.lock"
 flock 7
 if ! podman image exists "$image"; then
@@ -60,15 +69,20 @@ podman run "${common[@]}" --name "ci-buddy-fetch-$run" --preserve-fds=2 \
     -e CARGO_NET_GIT_FETCH_WITH_CLI=true "$image" sh -c '
     cargo fetch --locked && cargo metadata --locked --no-deps --format-version 1 > /work/out/metadata.json && eval "$1"
     status=$?
-    { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > /work/out/fetch-stats
-    exit "$status"' fetch "$prepare"
-[[ $kind != test ]] || argv=(bash -c "$test \"\$@\"" test "${argv[@]}")
+    { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${2}fetch-stats"
+    exit "$status"' fetch "$prepare" "$prefix"
+case $kind in
+    test) argv=(bash -c "$test \"\$@\"" test "${argv[@]}") ;;
+    gate|bench) argv=(bash -c "${!kind}") ;;
+esac
 limits=(); [[ -z $cpus ]] || limits=(--cpus "$cpus")
+data_mode=ro
+if [[ $exclusive == True ]]; then limits+=(--security-opt seccomp=unconfined); data_mode=rw; fi
 podman run "${common[@]}" "${limits[@]}" --name "ci-buddy-$run" --network=none --preserve-fds=2 \
     -v "$root/cargo/registry:/work/cargo/registry:ro" -v "$root/cargo/git:/work/cargo/git:ro" \
-    -v "$folder/data:/work/data:ro" -e CARGO_NET_OFFLINE=true "$image" sh -c '
-    wrapper=$1; shift
+    -v "$folder/data:/work/data:$data_mode" -e CARGO_NET_OFFLINE=true "$image" sh -c '
+    wrapper=$1; stats=$2; shift 2
     if [ -n "$wrapper" ]; then eval "set -- $wrapper \"\$@\""; fi
     "$@"; status=$?
-    { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > /work/out/stats
-    exit "$status"' run "$wrapper" "${argv[@]}"
+    { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${stats}stats"
+    exit "$status"' run "$wrapper" "$prefix" "${argv[@]}"

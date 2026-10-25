@@ -3,3 +3,5 @@ host = ""
 main = "main"
 image = ["Containerfile"]
 test = "cargo nextest run --workspace --locked --no-tests fail"
+gate = "cargo nextest run --workspace --locked --no-tests fail && python3 ci.py gate"
+bench = "python3 ci.py bench"

@@ -64,10 +64,37 @@ with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
     probe = """import fcntl,sys
 from pathlib import Path
 root = Path.home() / '.ci-buddy' / 'projects' / 'example'
-slot = (root / 'runs' / sys.argv[1] / 'slot').read_text().strip()
-with (root / 'slots' / slot / 'lock').open('r+') as lock:
-    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+out = root / 'runs' / sys.argv[1]
 """
-    subprocess.run(["ssh", sys.argv[1], "python3 -c " + shlex.quote(probe) + " " + run], check=True)
+    def run_probe(action, run):
+        subprocess.run(["ssh", sys.argv[1], "python3 -c " + shlex.quote(probe + action) + " " + run], check=True)
+    run_probe("""slot = (out / 'slot').read_text().strip()
+with (root / 'slots' / slot / 'lock').open('r+') as lock:
+    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)""", run)
     call("run", "--", "printf", "slot-released\\n")
+    call("run", "--exclusive", "--", "sh", "-c", 'printf readable >"$CI_BUDDY_DATA/probe"')
+    call("run", "--", "sh", "-c", '! printf wrong >"$CI_BUDDY_DATA/probe"; test "$(cat "$CI_BUDDY_DATA/probe")" = readable')
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
+    gate = call("gate")
+    run = next(line.split()[0].split("=")[1] for line in gate.splitlines() if line.startswith("run="))
+    verifying = subprocess.Popen(client + ["verify", commit], cwd=source, encoding="utf-8",
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        assert verifying.stdout.readline().startswith("waiting bench_task=")
+        run_probe("assert not (out / 'bench-exit').exists()\n(out / 'release').write_text('release')", run)
+        report = verifying.communicate()[0]
+    finally:
+        if verifying.poll() is None:
+            call("cancel", run)
+            verifying.communicate()
+    assert verifying.returncode == 0 and "gate green" in report and "bench green " + run in report, report
+    config.write_text("\n".join('gate = "false"' if line.startswith("gate = ") else line for line in original.splitlines()) + "\n")
+    subprocess.run(["git", "-c", "user.name=example", "-c", "user.email=example@example.invalid",
+                    "commit", "-qam", "red gate"], cwd=source, check=True)
+    red = call("gate", status=1)
+    run = next(line.split()[0].split("=")[1] for line in red.splitlines() if line.startswith("run="))
+    assert "bench_task=" not in red, red
+    run_probe("assert not (out / 'bench-task').exists()", run)
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
+    call("verify", commit, status=1)
 print("example end-to-end: green")
