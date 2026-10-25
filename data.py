@@ -136,6 +136,7 @@ elif command == "report":
             report.write(f"{prefix}runner ended before start; stats incomplete\n")
         sys.exit()
     started, ended, status = timing if timing else (job[stage + "started_at"], time.time(), 137)
+    job[stage + "started_at"] = float(started)
     job[stage + "ended_at"], job[stage + "exit"] = float(ended), int(status)
     with (output / "report.txt").open("a") as report:
         queued = job["bench_queued_at" if prefix else "queued_at"]

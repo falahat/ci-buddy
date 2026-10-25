@@ -10,7 +10,6 @@ values=$(python3 "$root/bin/data.py" host "$root"); eval "$values"
 values=$(python3 "$root/bin/data.py" load "$out" "${4:-}"); eval "$values"
 started=$EPOCHREALTIME
 started_field=started_at; [[ $kind != bench ]] || started_field=bench_started_at
-python3 "$root/bin/data.py" stamp "$out" "$started_field" "$started"
 finish() {
     status=$?
     python3 "$root/bin/data.py" report "$out" "$prefix" "$started" "$EPOCHREALTIME" "$status"
@@ -52,6 +51,8 @@ values=$(python3 "$root/bin/data.py" image "$slot/src" "$slot/context" "$project
 exec 6>"$root/turnstile" 4>"$root/machine.lock"
 lock_mode=-s; [[ $exclusive != True ]] || lock_mode=-x
 flock -x 6; flock "$lock_mode" 4; flock -u 6
+started=$EPOCHREALTIME
+python3 "$root/bin/data.py" stamp "$out" "$started_field" "$started"
 exec 7>"$root/containers/$image.lock"
 flock 7
 if ! podman image exists "$image"; then

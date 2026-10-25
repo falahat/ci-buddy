@@ -43,6 +43,7 @@ sees dependency caches and project data read-only. Every job checks free disk,
 has a memory cap, and inherits slot/machine locks into the container.
 Reports include queue/run seconds, fetch/run CPU seconds, peak memory and OOM
 counts; missing statistics are marked incomplete. Image-build CPU is excluded.
+Queue wait includes admission through the machine lock; runtime starts after it.
 
 Run `python3 check.py` and `python3 e2e.py <host>` to check the source boundary
 and drive the example through output, exit status, tests, isolation and cancel.
