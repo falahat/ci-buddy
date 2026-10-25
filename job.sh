@@ -5,22 +5,27 @@ export PUEUE_CONFIG_PATH="$root/pueue.yml"
 export TMPDIR="$root/containers"
 folder=$root/projects/$project
 out=$folder/runs/$run
+trap 'git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"' EXIT
+field() { python3 "$root/bin/data.py" field "$out/$1"; }
+write_field() { python3 "$root/bin/data.py" write "$out/$1" "$2"; }
+phase() { python3 "$root/bin/data.py" phase "$out" "${prefix//-/_}" "$1"; }
 prefix=""; [[ ${4:-} != bench ]] || prefix=bench-
 values=$(python3 "$root/bin/data.py" host "$root"); eval "$values"
 values=$(python3 "$root/bin/data.py" load "$out" "${4:-}"); eval "$values"
 started=$EPOCHREALTIME
-started_field=started_at; [[ $kind != bench ]] || started_field=bench_started_at
+started_field=started_at; [[ -z $prefix ]] || started_field=bench_started_at
 finish() {
     status=$?
+    git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
     python3 "$root/bin/data.py" report "$out" "$prefix" "$started" "$EPOCHREALTIME" "$status"
     if [[ $status == 0 && $kind == gate && -n ${bench:-} ]]; then
         python3 "$root/bin/data.py" stamp "$out" bench_queued_at "$EPOCHREALTIME"
-        id=$(pueue add --print-task-id --group exclusive --after "$(<"$out/task")" --label "$project/$run/bench" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run" bench)
-        echo "$id" >"$out/bench-task"
+        id=$(pueue add --print-task-id --group exclusive --after "$(field task)" --label "$project/$run/bench" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run" bench)
+        write_field bench-task "$id"
         echo "bench_task=$id"
     fi
-    cat "$out/report.txt"
-    echo "$status" >"$out/${prefix}exit"
+    python3 "$root/bin/data.py" read "$out/report.txt"
+    write_field "${prefix}exit" "$status"
 }
 trap finish EXIT
 free=$(df --output=avail -B1 "$root" | tail -1)
@@ -37,22 +42,29 @@ done
 if [[ -z $chosen ]]; then read -r chosen _ <<<"$order"; exec 3>"$folder/slots/$chosen/lock"; flock 3; fi
 slot=$folder/slots/$chosen
 flock -u 5
-echo "$chosen" >"$out/slot"
+write_field slot "$chosen"
 echo "slot=$chosen commit=$commit"
-[[ -d $slot/src/.git ]] || git clone --quiet --no-checkout "$folder/git" "$slot/src"
-git -C "$slot/src" fetch --quiet "$folder/git" "$commit"
-git -C "$slot/src" checkout --quiet --force --detach "$commit"
-git -C "$slot/src" clean -fdq
-git -C "$folder/git" update-ref "refs/slots/$chosen" "$commit"
-git -C "$slot/src" update-ref refs/remotes/origin/main "$base"
-git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
-mkdir -p "$root/cargo"/{registry,git} "$root/sccache" "$slot/context"
-values=$(python3 "$root/bin/data.py" image "$slot/src" "$slot/context" "$project"); eval "$values"
 exec 6>"$root/turnstile" 4>"$root/machine.lock"
 lock_mode=-s; [[ $exclusive != True ]] || lock_mode=-x
+# An exclusive waiter holds the turnstile while shared holders drain; newcomers wait.
 flock -x 6; flock "$lock_mode" 4; flock -u 6
 started=$EPOCHREALTIME
 python3 "$root/bin/data.py" stamp "$out" "$started_field" "$started"
+phase checkout
+mkdir -p "$slot/src"
+[[ -d $slot/git ]] || git clone --quiet --bare "$folder/git" "$slot/git"
+repository=(git -c "core.hooksPath=$root/bin" -c core.fsmonitor=false -c gc.auto=0 -c maintenance.auto=false
+    --git-dir="$slot/git" --work-tree="$slot/src")
+"${repository[@]}" fetch --quiet "$folder/git" "$commit"
+"${repository[@]}" checkout --quiet --force --detach "$commit"
+"${repository[@]}" clean -fdq -e target -e .git
+git -C "$folder/git" update-ref "refs/slots/$chosen" "$commit"
+"${repository[@]}" update-ref refs/remotes/origin/main "$base"
+python3 "$root/bin/data.py" git-view "$slot/git" "$slot/src/.git"
+git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
+mkdir -p "$root/cargo"/{registry,git} "$root/sccache" "$slot/context"
+phase image
+values=$(python3 "$root/bin/data.py" image "$slot/src" "$slot/context" "$project" "$slot/git"); eval "$values"
 exec 7>"$root/containers/$image.lock"
 flock 7
 if ! podman image exists "$image"; then
@@ -64,23 +76,35 @@ common=(--rm --init --hostname "$(hostname)" --memory="$memory" --memory-swap="$
     -e CARGO_HOME=/work/cargo -e RUSTC_WRAPPER=sccache -e SCCACHE_DIR=/work/sccache
     -e "CI_BUDDY_PROJECT=$project" -e "CI_BUDDY_RUN=$run" -e "CI_BUDDY_KIND=$kind"
     -e "CI_BUDDY_COMMIT=$commit" -e "CI_BUDDY_BASE=$base" -e CI_BUDDY_OUT=/work/out -e CI_BUDDY_DATA=/work/data)
+# Podman inherits descriptors 3 (slot) and 4 (machine). Its processes keep the
+# flock descriptions alive even if the host runner dies; every step inherits both.
+phase fetch
 podman run "${common[@]}" --name "ci-buddy-fetch-$run" --preserve-fds=2 \
     -v "$root/cargo:/work/cargo" -v "$folder/data:/work/data" -v "$folder/secrets:/run/secrets:ro" \
     -e GIT_CONFIG_GLOBAL=/run/secrets/gitconfig -e 'GIT_SSH_COMMAND=ssh -F /run/secrets/ssh/config' \
     -e CARGO_NET_GIT_FETCH_WITH_CLI=true "$image" sh -c '
-    cargo fetch --locked && cargo metadata --locked --no-deps --format-version 1 > /work/out/metadata.json && eval "$1"
+    cargo fetch --locked && cargo metadata --locked --no-deps --format-version 1 > /work/out/metadata.json
     status=$?
-    { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${2}fetch-stats"
-    exit "$status"' fetch "$prepare" "$prefix"
+    { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${1}fetch-stats"
+    exit "$status"' fetch "$prefix"
+limits=(); [[ -z $cpus ]] || limits=(--cpus "$cpus")
+dependencies=(-v "$root/cargo/registry:/work/cargo/registry:ro" -v "$root/cargo/git:/work/cargo/git:ro")
+if [[ -n $prepare ]]; then
+    phase prepare
+    podman run "${common[@]}" "${limits[@]}" --name "ci-buddy-prepare-$run" --preserve-fds=2 \
+        "${dependencies[@]}" -v "$folder/data:/work/data" "$image" sh -c '
+        eval "$1"; status=$?
+        { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${2}prepare-stats"
+        exit "$status"' prepare "$prepare" "$prefix"
+fi
 case $kind in
     test) argv=(bash -c "$test \"\$@\"" test "${argv[@]}") ;;
     gate|bench) argv=(bash -c "${!kind}") ;;
 esac
-limits=(); [[ -z $cpus ]] || limits=(--cpus "$cpus")
 data_mode=ro
 if [[ $exclusive == True ]]; then limits+=(--security-opt seccomp=unconfined); data_mode=rw; fi
-podman run "${common[@]}" "${limits[@]}" --name "ci-buddy-$run" --network=none --preserve-fds=2 \
-    -v "$root/cargo/registry:/work/cargo/registry:ro" -v "$root/cargo/git:/work/cargo/git:ro" \
+phase command
+podman run "${common[@]}" "${limits[@]}" --name "ci-buddy-$run" --network=none --preserve-fds=2 "${dependencies[@]}" \
     -v "$folder/data:/work/data:$data_mode" -e CARGO_NET_OFFLINE=true "$image" sh -c '
     wrapper=$1; stats=$2; shift 2
     if [ -n "$wrapper" ]; then eval "set -- $wrapper \"\$@\""; fi

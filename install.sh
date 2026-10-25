@@ -1,17 +1,18 @@
 set -euo pipefail
 [[ $# == 2 && $1 == --root ]] || { echo 'usage: bash install.sh --root <dir>' >&2; exit 2; }
 [[ $(id -u) != 0 ]] || { echo 'ci-buddy requires a rootless user' >&2; exit 2; }
-for tool in podman git python3 zstd systemctl; do command -v "$tool"; done
+for tool in podman git python3 zstd systemctl systemd-escape; do command -v "$tool"; done
 source_dir=$(cd "$(dirname "$0")" && pwd -P)
-mkdir -p "$2"
+[[ -f $2/host.conf ]] || { echo 'ci-buddy: write <root>/host.conf with jobs, slots, memory, cpus, min_free_gb, slot_max_gb and workers before installing' >&2; exit 2; }
 root=$(cd "$2" && pwd -P)
 python3 - "$root" <<'PY'
 import hashlib, json, os, pathlib, platform, shutil, sys, tomllib, urllib.request
 root = pathlib.Path(sys.argv[1])
-config = root / 'host.conf'
-if not config.exists():
-    config.write_text('jobs = 3\nslots = 4\nmemory = "28g"\ncpus = ""\nmin_free_gb = 500\nslot_max_gb = 100\nkeep_days = 90\nworkers = []\n')
-limits = tomllib.loads(config.read_text())
+limits = tomllib.loads((root / 'host.conf').read_text())
+required = {'jobs', 'slots', 'memory', 'cpus', 'min_free_gb', 'slot_max_gb', 'workers'}
+missing = required - limits.keys()
+if missing:
+    raise SystemExit('ci-buddy: host.conf requires ' + ', '.join(sorted(missing)))
 if shutil.disk_usage(root).free < limits['min_free_gb'] * 10**9:
     raise SystemExit('ci-buddy: free disk is below min_free_gb')
 for directory in ('bin', 'containers', 'cargo', 'sccache', 'projects', 'pueue'):
@@ -36,21 +37,41 @@ storage = config_home / 'containers' / 'storage.conf'
 storage.parent.mkdir(parents=True, exist_ok=True)
 if not storage.exists():
     storage.write_text(f'[storage]\ndriver = "overlay"\ngraphroot = {json.dumps(str(root / "containers"))}\n')
-if pathlib.Path(tomllib.loads(storage.read_text())['storage']['graphroot']).resolve() != root / 'containers':
-    raise SystemExit('ci-buddy: existing Podman storage.conf points elsewhere')
-(root / 'pueue.yml').write_text('shared:\n  pueue_directory: ' + json.dumps(str(root / 'pueue')) + '\n  runtime_directory: ' + json.dumps(str(root / 'pueue')) + '\nclient:\n  read_local_logs: false\n')
+(root / 'pueue.yml').write_text(
+    'shared:\n'
+    f'  pueue_directory: {json.dumps(str(root / "pueue"))}\n'
+    f'  runtime_directory: {json.dumps(str(root / "pueue"))}\n'
+    'client:\n  read_local_logs: false\n')
 units = config_home / 'systemd' / 'user'
 units.mkdir(parents=True, exist_ok=True)
 for name, body in {
-    'pueued.service': f'[Unit]\nDescription=ci-buddy queue\n[Service]\nType=exec\nExecStart="{root}/bin/pueued" --config "{root}/pueue.yml"\nRestart=no\n[Install]\nWantedBy=default.target\n',
-    'ci-buddy-upkeep.service': f'[Unit]\nDescription=ci-buddy upkeep\n[Service]\nType=oneshot\nExecStart=bash "{root}/bin/upkeep.sh"\n',
-    'ci-buddy-upkeep.timer': '[Unit]\nDescription=Daily ci-buddy upkeep\n[Timer]\nOnCalendar=daily\nPersistent=true\n[Install]\nWantedBy=timers.target\n',
+    'ci-buddy-pueued@.service': '''[Unit]
+Description=ci-buddy queue (%f)
+[Service]
+Type=exec
+ExecStart="%f/bin/pueued" --config "%f/pueue.yml"
+Restart=on-failure
+[Install]
+WantedBy=default.target
+''',
+    'ci-buddy-upkeep@.service': '''[Unit]
+Description=ci-buddy upkeep (%f)
+[Service]
+Type=oneshot
+ExecStart=bash "%f/bin/upkeep.sh"
+''',
+    'ci-buddy-upkeep@.timer': '''[Unit]
+Description=Daily ci-buddy upkeep (%f)
+[Timer]
+OnCalendar=daily
+Persistent=true
+[Install]
+WantedBy=timers.target
+''',
 }.items():
-    (units / name).write_text(body.replace('%', '%%'))
+    (units / name).write_text(body)
 link = pathlib.Path.home() / '.ci-buddy'
-if link.is_symlink() and link.resolve() != root:
-    raise SystemExit('ci-buddy: existing home link points elsewhere')
-if not link.exists():
+if not link.exists() and not link.is_symlink():
     link.symlink_to(root, target_is_directory=True)
 PY
 [[ $(podman info --format '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}') == 'true v2' ]] || {
@@ -63,15 +84,18 @@ for file in ci-buddy data.py job.sh upkeep.sh; do
 done
 touch "$root/machine.lock" "$root/turnstile"
 systemctl --user daemon-reload
-systemctl --user enable --now pueued.service ci-buddy-upkeep.timer
+# A path instance gives every root its own queue and upkeep without changing peers.
+instance=$(systemd-escape --path "$root")
+queue_unit=ci-buddy-pueued@$instance.service
+systemctl --user enable --now "$queue_unit" "ci-buddy-upkeep@$instance.timer"
 export PUEUE_CONFIG_PATH="$root/pueue.yml"
-python3 - "$root" <<'PY'
+python3 - "$root" "$queue_unit" <<'PY'
 import getpass, json, pathlib, subprocess, sys, time, tomllib
 root = pathlib.Path(sys.argv[1])
 pueue = str(root / 'bin' / 'pueue')
 socket = root / 'pueue' / f'pueue_{getpass.getuser()}.socket'
 while not socket.is_socket():
-    subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'pueued.service'], check=True)
+    subprocess.run(['systemctl', '--user', 'is-active', '--quiet', sys.argv[2]], check=True)
     time.sleep(0.05)
 groups = json.loads(subprocess.check_output([pueue, 'group', '--json']))
 jobs = tomllib.loads((root / 'host.conf').read_text())['jobs']

@@ -7,9 +7,12 @@ if [[ ${1:-} != --server ]]; then
         fi
     done <ci-buddy.toml
     : "${name:?}" "${host:?}" "${main:?}"
+    destination=${host%%:*}; remote_root=.ci-buddy
+    [[ $host != *:* ]] || remote_root=${host#*:}
+    [[ -n $destination && -n $remote_root ]] || exit 2
     [[ $name =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
     command=${1:?command required}; shift
-    remote() { ssh "$host" "bash ~/.ci-buddy/bin/ci-buddy --server $(printf '%q ' "$name" "$@")"; }
+    remote() { ssh "$destination" "bash $(printf '%q' "$remote_root/bin/ci-buddy") --server $(printf '%q ' "$name" "$@")"; }
     case $command in
         status|log|cancel) remote "$command" "$@"; exit $? ;;
         verify) remote verify "$(git rev-parse "${1:?commit required}")"; exit $? ;;
@@ -38,10 +41,10 @@ if [[ ${1:-} != --server ]]; then
     esac
     main_ref=$(git rev-parse --quiet --verify "origin/$main" || git rev-parse --verify "$main")
     base=$(git merge-base "$candidate" "$main_ref")
-    branch=$(git symbolic-ref --short HEAD)
+    branch=$(git symbolic-ref --quiet --short HEAD) || { status=$?; [[ $status == 1 ]] || exit "$status"; branch=""; }
     run=$((${EPOCHREALTIME/./} * 1000 + RANDOM % 1000))
     remote init
-    git push --quiet --no-verify "$host:.ci-buddy/projects/$name/git" "$candidate:refs/ci-buddy/$run"
+    git push --quiet --no-verify "$destination:$remote_root/projects/$name/git" "$candidate:refs/ci-buddy/$run"
     remote submit "$run" "$command" "$candidate" "$base" "$branch" "${CI_BUDDY_SUBMITTER:-$HOSTNAME}" "$@"
     exit $?
 fi
@@ -53,15 +56,23 @@ export PATH="$root/bin:$PATH"
 export PUEUE_CONFIG_PATH="$root/pueue.yml"
 data=$root/bin/data.py
 folder=$root/projects/$project
+field() { python3 "$data" field "$folder/runs/$run/$1"; }
+write_field() { python3 "$data" write "$folder/runs/$run/$1" "$2"; }
 wait_task() {
-    local id=$1 prefix=${2:-}
-    [[ ! -f $folder/runs/$run/${prefix}exit ]] || return 0
+    local id=$1 prefix=${2:-} value
+    value=$(field "${prefix}exit")
+    [[ -z $value ]] || return 0
     pueue wait --quiet "$id" || true
-    if [[ ! -f $folder/runs/$run/${prefix}exit ]]; then
-        podman wait "ci-buddy-$run" || podman wait "ci-buddy-fetch-$run" || true
-        python3 "$data" report "$folder/runs/$run" "$prefix"
-        echo 137 >"$folder/runs/$run/${prefix}exit"
-    fi
+    (
+        flock 3
+        value=$(field "${prefix}exit")
+        if [[ -z $value ]]; then
+            podman wait "ci-buddy-$run" || podman wait "ci-buddy-prepare-$run" || podman wait "ci-buddy-fetch-$run" || true
+            python3 "$data" report "$folder/runs/$run" "$prefix"
+            write_field "${prefix}exit" 137
+            git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
+        fi
+    ) 3>"$root/containers/recover-$project-$run.lock"
 }
 case $command in
     init)
@@ -72,30 +83,35 @@ case $command in
     submit)
         run=$1; shift
         [[ $run =~ ^[0-9]+$ ]] || exit 2
+        # If submission fails before there is a queued task, no runner can clean the ref.
+        trap '[[ -n ${id:-} ]] || git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"' EXIT
         mkdir "$folder/runs/$run"
         group=$(python3 "$data" job "$folder" "$run" "$@")
         id=$(pueue add --stashed --print-task-id --group "$group" --label "$project/$run" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run")
-        echo "$id" >"$folder/runs/$run/task"
+        write_field task "$id"
         pueue enqueue "$id"
         echo "run=$run task=$id"
         pueue follow "$id" || true
         wait_task "$id"
-        exit "$(<"$folder/runs/$run/exit")"
+        exit "$(field exit)"
         ;;
     verify)
         commit=${1:?commit required}
         run=$(python3 "$data" gate "$folder" "$commit")
         out=$folder/runs/$run
-        wait_task "$(<"$out/task")"
-        if [[ -f $out/bench-task ]]; then
-            [[ -f $out/bench-exit ]] || echo "waiting bench_task=$(<"$out/bench-task")"
-            wait_task "$(<"$out/bench-task")" bench-
+        task=$(field task)
+        wait_task "$task"
+        bench_id=$(field bench-task)
+        if [[ -n $bench_id ]]; then
+            bench_exit=$(field bench-exit)
+            [[ -n $bench_exit ]] || echo "waiting bench_task=$bench_id"
+            wait_task "$bench_id" bench-
         fi
-        cat "$out/report.txt"
+        python3 "$data" read "$out/report.txt"
         values=$(python3 "$data" load "$out" ""); eval "$values"
-        [[ $(<"$out/exit") == 0 ]] || exit 1
+        [[ $(field exit) == 0 ]] || exit 1
         if [[ $bench_required == True ]]; then
-            [[ -f $out/bench-exit && $(<"$out/bench-exit") == 0 ]] || exit 1
+            [[ $(field bench-exit) == 0 ]] || exit 1
         fi
         echo "verified=$commit base=$base"
         ;;
@@ -107,25 +123,24 @@ case $command in
         run=${1:?run required}
         [[ $run =~ ^[0-9]+$ ]] || exit 2
         if [[ $command == log ]]; then
-            ids=("$(<"$folder/runs/$run/task")")
-            [[ ! -f $folder/runs/$run/bench-task ]] || ids+=("$(<"$folder/runs/$run/bench-task")")
+            task=$(field task); bench_id=$(field bench-task)
+            ids=("$task"); [[ -z $bench_id ]] || ids+=("$bench_id")
             pueue log "${ids[@]}"
         else
-            prefix=""; [[ ! -f $folder/runs/$run/bench-task ]] || prefix=bench-
-            [[ ! -f $folder/runs/$run/${prefix}exit ]] || exit 0
-            label="$project/$run"; [[ -z $prefix ]] || label="$label/bench"
-            task=$(pueue status --json | python3 "$data" task "$label")
             stop_container() {
-                for container in "ci-buddy-$run" "ci-buddy-fetch-$run"; do
+                for container in "ci-buddy-$run" "ci-buddy-prepare-$run" "ci-buddy-fetch-$run"; do
                     if podman container exists "$container"; then podman kill "$container"; return; fi
                 done
                 return 1
             }
-            if stop_container; then
-                :
-            elif [[ -n $task ]] && pueue remove "$task"; then
-                echo 137 >"$folder/runs/$run/${prefix}exit"
-                echo 'cancelled before start; stats incomplete' >>"$folder/runs/$run/report.txt"
+            if stop_container; then exit 0; fi
+            tasks=$(pueue status --json | python3 "$data" task "$project/$run")
+            read -r task prefix <<<"$tasks"
+            [[ -n $task ]] || exit 0
+            if pueue remove "$task"; then
+                write_field "${prefix}exit" 137
+                python3 "$data" append "$folder/runs/$run/report.txt" 'cancelled before start; stats incomplete'
+                git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
             elif [[ -n $task ]]; then
                 pueue kill "$task"
                 stop_container || true

@@ -1,8 +1,10 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -18,9 +20,25 @@ def emit(values):
         print(f"{key}={shlex.quote(str(value))}")
 
 
-def write_job(path, job):
+def open_file(path, mode="r"):
+    flags = {"r": os.O_RDONLY, "w": os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+             "a": os.O_WRONLY | os.O_CREAT | os.O_APPEND}[mode]
+    descriptor = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ValueError(f"not a regular file: {path}")
+    return os.fdopen(descriptor, mode, encoding="utf-8")
+
+
+def read_file(path):
+    with open_file(path) as stream:
+        return stream.read()
+
+
+def write_file(path, content):
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(job))
+    with open_file(temporary, "w") as stream:
+        stream.write(content)
     temporary.replace(path)
 
 
@@ -37,11 +55,25 @@ def project_config(repository, commit="HEAD"):
 
 
 command, *args = sys.argv[1:]
-if command == "host":
+if command in ("read", "field"):
+    try:
+        content = read_file(args[0])
+    except FileNotFoundError:
+        if command == "read":
+            raise
+        sys.exit()
+    sys.stdout.write(str(int(content)) if command == "field" else content)
+elif command == "write":
+    write_file(Path(args[0]), args[1] + "\n")
+elif command == "append":
+    with open_file(args[0], "a") as stream:
+        stream.write(args[1] + "\n")
+elif command == "host":
     config = tomllib.loads(Path(args[0], "host.conf").read_text())
     allowed = {"jobs", "slots", "memory", "cpus", "min_free_gb", "slot_max_gb", "keep_days", "workers"}
     if config.keys() - allowed:
         raise ValueError(f"unknown host settings: {config.keys() - allowed}")
+    config.setdefault("keep_days", 90)
     emit({key: config[key] for key in ("jobs", "slots", "memory", "cpus", "min_free_gb", "keep_days")})
 elif command == "job":
     folder, run, kind, commit, base, branch, submitter, *argv = args
@@ -61,10 +93,10 @@ elif command == "job":
                tree=git(Path(folder, "git"), "rev-parse", commit + "^{tree}"),
                argv=argv, key="", queued_at=time.time(), exclusive=exclusive,
                bench_required=kind == "gate" and "bench" in config)
-    write_job(Path(folder, "runs", run, "job.json"), job)
+    write_file(Path(folder, "runs", run, "job.json"), json.dumps(job))
     print("exclusive" if exclusive else "jobs")
 elif command == "load":
-    job = json.loads(Path(args[0], "job.json").read_text())
+    job = json.loads(read_file(Path(args[0], "job.json")))
     kind = args[1] or job["kind"]
     values = {key: job[key] for key in ("commit", "base", "branch")}
     values.update(kind=kind, exclusive=job["exclusive"] or kind == "bench", bench_required=job["bench_required"],
@@ -73,24 +105,31 @@ elif command == "load":
     print("argv=(" + shlex.join(job["argv"]) + ")")
 elif command == "stamp":
     path = Path(args[0], "job.json")
-    job = json.loads(path.read_text())
+    job = json.loads(read_file(path))
     job[args[1]] = float(args[2])
-    write_job(path, job)
+    write_file(path, json.dumps(job))
+elif command == "phase":
+    path = Path(args[0], "job.json")
+    job = json.loads(read_file(path))
+    job.setdefault(args[1] + "phases", []).append([args[2], time.time()])
+    write_file(path, json.dumps(job))
 elif command == "gate":
     for output in sorted(Path(args[0], "runs").iterdir(), reverse=True):
         path = output / "job.json"
-        if not path.is_file():
+        try:
+            job = json.loads(read_file(path))
+        except FileNotFoundError:
             continue
-        job = json.loads(path.read_text())
         if job["kind"] == "gate" and job["commit"] == args[1]:
             print(path.parent.name)
             break
     else:
         raise SystemExit("no gate recorded for this commit")
 elif command == "task":
-    for identifier, task in json.load(sys.stdin)["tasks"].items():
-        if task["label"] == args[0]:
-            print(identifier)
+    for identifier, task in reversed(list(json.load(sys.stdin)["tasks"].items())):
+        if "Done" not in task["status"] and task["label"] in (args[0], f"{args[0]}/bench"):
+            print(identifier, "bench-" if task["label"] != args[0] else "")
+            break
 elif command == "slots":
     repository, commit, count = args
     distances = []
@@ -101,8 +140,8 @@ elif command == "slots":
         distances.append((distance, slot))
     print(" ".join(str(slot) for _, slot in sorted(distances)))
 elif command == "image":
-    source, context, project = map(Path, args)
-    config = project_config(source)
+    source, context, project, repository = map(Path, args)
+    config = project_config(repository)
     shutil.rmtree(context)
     context.mkdir()
     digest = hashlib.sha256()
@@ -124,33 +163,49 @@ elif command == "image":
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
     emit(dict(image=f"ci-buddy-{project}:{digest.hexdigest()[:16]}", containerfile=config["image"][0],
-              prepare=config.get("prepare", "true"), wrapper=config.get("wrapper", ""),
+              prepare=config.get("prepare", ""), wrapper=config.get("wrapper", ""),
               test=config["test"], gate=config.get("gate", ""), bench=config.get("bench", "")))
+elif command == "git-view":
+    repository, view = map(Path, args)
+    if view.is_symlink() or not view.is_dir():
+        view.unlink(missing_ok=True)
+    else:
+        shutil.rmtree(view)
+    shutil.copytree(repository, view)
+    for key, value in (("core.bare", "false"), ("core.worktree", "/work/src")):
+        subprocess.run(["git", "--git-dir", str(view), "config", key, value], check=True)
 elif command == "report":
     output, prefix, *timing = args
     output = Path(output)
-    job = json.loads((output / "job.json").read_text())
+    job = json.loads(read_file(output / "job.json"))
     stage = prefix.replace("-", "_")
     if not timing and stage + "started_at" not in job:
-        with (output / "report.txt").open("a") as report:
+        with open_file(output / "report.txt", "a") as report:
             report.write(f"{prefix}runner ended before start; stats incomplete\n")
         sys.exit()
     started, ended, status = timing if timing else (job[stage + "started_at"], time.time(), 137)
     job[stage + "started_at"] = float(started)
     job[stage + "ended_at"], job[stage + "exit"] = float(ended), int(status)
-    with (output / "report.txt").open("a") as report:
+    with open_file(output / "report.txt", "a") as report:
         queued = job["bench_queued_at" if prefix else "queued_at"]
         report.write(f"{prefix}queue_s={float(started) - queued:.3f} run_s={float(ended) - float(started):.3f} exit={status}\n")
+        phases = job.get(stage + "phases", []) + [["end", float(ended)]]
+        for (name, begin), (_, end) in zip(phases, phases[1:]):
+            report.write(f"{prefix}{name}_s={end - begin:.3f}\n")
+        residual = float(ended) - float(started) - sum(b[1] - a[1] for a, b in zip(phases, phases[1:]))
+        report.write(f"{prefix}unaccounted_s={residual:.3f}\n")
         totals = []
-        for name in (prefix + "fetch-stats", prefix + "stats"):
-            if (output / name).exists():
-                try:
-                    values = dict(line.replace("=", " ").split() for line in (output / name).read_text().splitlines())
-                    totals.append({key: int(values[key]) for key in ("usage_usec", "memory_peak_bytes", "oom_kill")})
-                except (ValueError, KeyError):
-                    report.write(f"{name} malformed; stats incomplete\n")
+        for name in (prefix + "fetch-stats", prefix + "prepare-stats", prefix + "stats"):
+            try:
+                values = dict(line.replace("=", " ").split() for line in read_file(output / name).splitlines())
+                totals.append({key: int(values[key]) for key in ("usage_usec", "memory_peak_bytes", "oom_kill")})
+            except FileNotFoundError:
+                pass
+            except (ValueError, KeyError):
+                report.write(f"{name} malformed; stats incomplete\n")
         if totals:
-            report.write(f"cpu_s={sum(s['usage_usec'] for s in totals) / 1000000:.3f} peak_bytes={max(s['memory_peak_bytes'] for s in totals)} cap_killed={sum(s['oom_kill'] for s in totals)} scope=fetch+run\n")
-        if len(totals) != 2:
+            report.write(f"cpu_s={sum(s['usage_usec'] for s in totals) / 1000000:.3f} peak_bytes={max(s['memory_peak_bytes'] for s in totals)} cap_killed={sum(s['oom_kill'] for s in totals)} scope=fetch+prepare+run peak_includes_file_cache=true\n")
+        expected = 3 if any(name == "prepare" for name, _ in phases) else 2
+        if len(totals) != expected:
             report.write("stats incomplete\n")
-    write_job(output / "job.json", job)
+    write_file(output / "job.json", json.dumps(job))
