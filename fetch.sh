@@ -17,10 +17,9 @@ env = {key: os.environ[key] for key in ('PATH', 'RUSTUP_HOME')}
 env.update(HOME='/tmp', CARGO_HOME='/work/cargo', RUSTUP_TOOLCHAIN='1.99.0',
     CARGO_NET_GIT_FETCH_WITH_CLI='true', CARGO_NET_RETRY='0', GIT_TERMINAL_PROMPT='0',
     GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/run/secrets/gitconfig',
-    GIT_ALLOW_PROTOCOL='https:ssh', GIT_CONFIG_COUNT='3',
+    GIT_ALLOW_PROTOCOL='https:ssh', GIT_CONFIG_COUNT='2',
     GIT_CONFIG_KEY_0='core.hooksPath', GIT_CONFIG_VALUE_0='/tmp/no-hooks',
     GIT_CONFIG_KEY_1='core.fsmonitor', GIT_CONFIG_VALUE_1='false',
-    GIT_CONFIG_KEY_2='credential.helper', GIT_CONFIG_VALUE_2='',
     GIT_SSH_COMMAND='ssh -F /run/secrets/ssh/config -T -x -o BatchMode=yes '
         '-o StrictHostKeyChecking=yes -o IdentitiesOnly=yes '
         '-o ForwardAgent=no -o ClearAllForwardings=yes')
