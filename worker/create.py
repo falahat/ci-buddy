@@ -38,15 +38,17 @@ def exchange(command, key_file):
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL, start_new_session=True) as process:
         try:
-            process.stdin.write(('CI_BUDDY_CHALLENGE ' + nonce + '\n').encode())
-            process.stdin.flush()
-            total, sent = 0, False
+            total, challenged, sent = 0, False, False
             while line := process.stdout.readline(8193):
                 total += len(line)
                 if len(line) > 8192 or total > 1024 * 1024:
                     raise ValueError('bootstrap output exceeds its byte limit')
                 line = line.strip()
-                if line == ('CI_BUDDY_KEY_READY ' + nonce).encode() and not sent:
+                if line == b'CI_BUDDY_BOOTSTRAP_READY' and not challenged:
+                    process.stdin.write(('CI_BUDDY_CHALLENGE ' + nonce + '\n').encode())
+                    process.stdin.flush()
+                    challenged = True
+                if challenged and line == ('CI_BUDDY_KEY_READY ' + nonce).encode() and not sent:
                     try:
                         process.stdin.write(private(key_file).read_bytes().strip() + b'\n')
                         process.stdin.flush()

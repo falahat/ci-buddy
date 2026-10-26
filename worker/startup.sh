@@ -33,7 +33,7 @@ try:
     port = open('/dev/ttyS1', 'r+b', buffering=0)
     os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
     run('apt-get', 'update')
-    run('apt-get', 'install', '-y', 'podman', 'uidmap', 'passt', 'git', 'python3', 'openssh-server', 'ca-certificates', 'curl')
+    run('apt-get', 'install', '-y', 'podman', 'uidmap', 'passt', 'git', 'python3', 'openssh-server', 'ca-certificates', 'curl', 'zstd')
     run('curl', '-fsSLo', '/usr/share/keyrings/tailscale-archive-keyring.gpg', 'https://pkgs.tailscale.com/stable/ubuntu/resolute.noarmor.gpg')
     pathlib.Path('/usr/share/keyrings/tailscale-archive-keyring.gpg').chmod(0o644)
     run('curl', '-fsSLo', '/etc/apt/sources.list.d/tailscale.list', 'https://pkgs.tailscale.com/stable/ubuntu/resolute.tailscale-keyring.list')
@@ -50,6 +50,7 @@ try:
     conf.write_text(config['host_conf'])
     os.chown(conf, user.pw_uid, user.pw_gid)
     pathlib.Path('/etc/ssh/ci-buddy-authorized-keys').write_text('\n'.join(keys) + '\n')
+    pathlib.Path('/etc/ssh/ci-buddy-authorized-keys').chmod(0o644)
     ssh = f"""Port 22
 AllowUsers {account}
 AuthorizedKeysFile /etc/ssh/ci-buddy-authorized-keys
@@ -69,6 +70,7 @@ UsePAM yes
     run('systemctl', 'disable', '--now', 'ssh.socket')
     run('systemctl', 'enable', '--now', 'ssh.service', 'tailscaled.service')
     run('systemctl', 'restart', 'ssh.service')
+    port.write(b'CI_BUDDY_BOOTSTRAP_READY\n')
     challenge = port.readline(129)
     assert re.fullmatch(rb'CI_BUDDY_CHALLENGE [0-9a-f]{32}\n', challenge)
     port.write(b'CI_BUDDY_KEY_READY ' + challenge.split()[1] + b'\n')

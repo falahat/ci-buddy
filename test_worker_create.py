@@ -16,6 +16,7 @@ from worker import create
 
 PUBLIC = 'ssh-ed25519 ' + base64.b64encode(b'\0\0\0\x0bssh-ed25519\0\0\0\x20' + b'\x01' * 32).decode()
 NONCE = 'a' * 32
+BOOT = b'CI_BUDDY_BOOTSTRAP_READY\n'
 READY = b'CI_BUDDY_READY ' + json.dumps(dict(ip='100.64.0.7', hostkey=PUBLIC)).encode() + b'\n'
 
 
@@ -74,9 +75,11 @@ class WorkerCreate(unittest.TestCase):
     def test_fresh_challenge_ignores_replay_and_only_stdin_gets_secret(self):
         marker = ('CI_BUDDY_KEY_READY ' + NONCE + '\n').encode()
         def observe(line, written):
+            if line == BOOT:
+                self.assertEqual(written, b'')
             if line == marker:
                 self.assertNotIn(self.secret, written)
-        output = b'CI_BUDDY_KEY_READY old\n' + READY + marker + READY
+        output = b'CI_BUDDY_KEY_READY old\n' + READY + BOOT + marker + READY
         result, process = self.exchange(output, observe=observe)
         self.assertEqual(result['ip'], '100.64.0.7')
         self.assertEqual(process.stdin.getvalue(), ('CI_BUDDY_CHALLENGE ' + NONCE + '\n').encode() + self.secret + b'\n')
@@ -84,7 +87,7 @@ class WorkerCreate(unittest.TestCase):
 
     def test_attempted_send_failure_consumes_key_but_early_eof_does_not(self):
         with self.assertRaises(BrokenPipeError):
-            self.exchange(('CI_BUDDY_KEY_READY ' + NONCE + '\n').encode(), fail_write=True)
+            self.exchange(BOOT + ('CI_BUDDY_KEY_READY ' + NONCE + '\n').encode(), fail_write=True)
         self.assertFalse(self.key.exists())
         self.write_key()
         with self.assertRaisesRegex(ValueError, 'no retry'):
@@ -99,7 +102,7 @@ class WorkerCreate(unittest.TestCase):
         for value in bad:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.write_key()
-                self.exchange(('CI_BUDDY_KEY_READY ' + NONCE + '\n').encode() + b'CI_BUDDY_READY ' + value + b'\n')
+                self.exchange(BOOT + ('CI_BUDDY_KEY_READY ' + NONCE + '\n').encode() + b'CI_BUDDY_READY ' + value + b'\n')
             self.assertFalse(self.key.exists())
         for output in (b'x' * 8193, (b'x' * 8191 + b'\n') * 129):
             with self.subTest(bound=len(output)), self.assertRaisesRegex(ValueError, 'byte limit'):
