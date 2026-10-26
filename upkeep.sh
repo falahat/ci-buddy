@@ -12,7 +12,7 @@ for project in "$root/projects/"*; do
         [[ -d $slot/src/target ]] || continue
         (
             exec 3>"$slot/lock"
-            flock -n 3 || { echo "busy_slot=$project/$slot skipped"; exit 0; }
+            flock -n 3 || { echo "busy_slot=$slot skipped"; exit 0; }
             exec 6>"$root/turnstile" 4>"$root/machine.lock"
             # Maintenance follows the same machine admission as builds.
             flock -x 6; flock -s 4; flock -u 6
@@ -27,7 +27,9 @@ for project in "$root/projects/"*; do
             limits=(); [[ -z $cpus ]] || limits=(--cpus "$cpus")
             podman run --rm --init --name "ci-buddy-upkeep-${project##*/}-${slot##*/}" \
                 --memory="$memory" --memory-swap="$memory" --pids-limit=8192 --network=none --preserve-fds=2 \
-                "${limits[@]}" -v "$slot/src:/work/src" -w /work/src "$image" \
+                "${limits[@]}" -v "$slot/src:/work/src" -w /work/src \
+                -v "$root/cargo/registry:/work/cargo/registry:ro" -v "$root/cargo/git:/work/cargo/git:ro" \
+                -e CARGO_HOME=/work/cargo -e CARGO_NET_OFFLINE=true "$image" \
                 sh -c 'cargo sweep --time 7 && cargo sweep --maxsize "$1" && du -sb target' upkeep "${budget}B"
             du -sb "$slot"
         )
