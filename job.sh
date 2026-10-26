@@ -24,6 +24,7 @@ if [[ -z $prefix ]]; then
         if [[ $dispatched != 3 ]]; then
             write_field exit "$dispatched"
             python3 "$root/bin/data.py" stamp "$out" exit "$dispatched"
+            python3 "$root/bin/data.py" stamp "$out" ended_at "$EPOCHREALTIME"
             python3 "$root/bin/data.py" record "$out"
             exit "$dispatched"
         fi

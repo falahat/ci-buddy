@@ -209,7 +209,7 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
         # Provision the second endpoint with this root in its workers first.
         config.write_text(original.replace(endpoint, sys.argv[2]))
         subprocess.run(author + ["commit", "-qam", "worker coordinator"], cwd=source, check=True)
-        worker = call("test", "--rerun", "-p", "consumer")
+        worker = call("test", "--rerun", "-E", "package(=consumer)")
         assert "worker=" in worker and "worker_returned=" in worker
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
         answer = json.loads(call("history", "change", commit))["answer"]

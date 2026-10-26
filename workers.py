@@ -55,6 +55,9 @@ if not workers or job['exclusive'] or job['bench_required']:
 choices = [(distance(root, project, job['commit']), '', '')]
 for endpoint in workers:
     host, worker_root = endpoint.split(':', 1)
+    revision = subprocess.check_output(['ssh', host, shlex.join(['cat', str(Path(worker_root, 'bin', 'revision'))])], text=True).strip()
+    if revision != (root / 'bin/revision').read_text().strip():
+        raise ValueError('worker version differs; install the same commit on both roots')
     server = ['bash', str(Path(worker_root, 'bin', 'ci-buddy')), '--server', project]
     subprocess.run(['ssh', host, shlex.join(server + ['init'])], check=True)
     subprocess.run(['git', '-C', str(folder / 'git'), 'push', '--quiet',
@@ -71,7 +74,8 @@ if not host:
 job['worker'] = host + ':' + worker_root
 (out / 'job.json').write_text(json.dumps(job))
 server = ['bash', str(Path(worker_root, 'bin', 'ci-buddy')), '--server', project]
-arguments = ['--rerun'] if job['rerun'] else []
+# The coordinator already decided reuse; a dispatched run executes once.
+arguments = [] if job['kind'] == 'run' else ['--rerun']
 if job['kind'] == 'test' and not job['argv']:
     arguments += ['--since', job['base']]
 command = server + ['submit', identifier, job['kind'], job['commit'], job['base'], job['branch'], job['submitter']] + arguments + job['argv']

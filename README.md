@@ -74,3 +74,6 @@ host. There is no automatic retry or cloud provisioning. Optional sccache.env
 is passed to prepare/run containers; never store project fetch credentials there.
 To exercise workers in the end-to-end test, give e2e.py a second coordinator
 endpoint configured to use the first endpoint as its worker.
+
+Install the same commit on coordinator and workers. The coordinator owns reuse;
+a newly dispatched request forces one fresh execution in the worker queue.

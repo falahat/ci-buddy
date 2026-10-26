@@ -85,6 +85,7 @@ wait_task() {
         value=$(field "${prefix}exit")
         if [[ -z $value ]]; then
             podman wait "ci-buddy-$run" || podman wait "ci-buddy-prepare-$run" || podman wait "ci-buddy-fetch-$run" || true
+            python3 "$data" stamp "$folder/runs/$run" "${prefix//-/_}ended_at" "$EPOCHREALTIME"
             python3 "$data" report "$folder/runs/$run" "$prefix"
             write_field "${prefix}exit" 137
             python3 "$data" record "$folder/runs/$run"
