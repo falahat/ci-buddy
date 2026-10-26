@@ -5,3 +5,14 @@ version = 4
 [[package]]
 name = "arithmetic"
 version = "0.1.0"
+
+[[package]]
+name = "consumer"
+version = "0.1.0"
+dependencies = [
+ "arithmetic",
+]
+
+[[package]]
+name = "unrelated"
+version = "0.1.0"

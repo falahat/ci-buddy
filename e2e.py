@@ -84,6 +84,15 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
     call("run", "--", "sh", "-c", "exit 23", status=23)
     test_run = run_id(call("test", "--rerun"))
     assert "passed" in call("log", test_run)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
+    for name, expected in (("arithmetic/src/lib.rs", 2), ("consumer/src/lib.rs", 1), ("ci-buddy.toml", 3)):
+        path = source / name
+        before = path.read_text()
+        path.write_text(before + ("\n# shared change\n" if name.endswith("toml") else "\n// package change\n"))
+        try:
+            assert f"selected={expected} total=3" in call("test", "--since", base)
+        finally:
+            path.write_text(before)
     started = time.monotonic()
     assert "reused_from=" + test_run in call("test") and time.monotonic() - started < 5
     assert "reused_from=" not in call("test", "--rerun")
