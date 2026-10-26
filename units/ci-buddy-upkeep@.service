@@ -2,4 +2,5 @@
 Description=ci-buddy upkeep (%f)
 [Service]
 Type=oneshot
+UMask=0077
 ExecStart=bash "%f/bin/upkeep.sh"

@@ -1,4 +1,5 @@
 set -euo pipefail
+umask 077
 [[ $# == 2 && $1 == --root ]] || { echo 'usage: bash install.sh --root <dir>' >&2; exit 2; }
 [[ $(id -u) != 0 ]] || { echo 'ci-buddy requires a rootless user' >&2; exit 2; }
 for tool in podman git python3 zstd systemctl systemd-escape; do command -v "$tool"; done
@@ -17,15 +18,30 @@ fi
 python3 - "$root" "$source_dir" <<'PY'
 import hashlib, json, os, pathlib, platform, shutil, sys, tomllib, urllib.request
 root = pathlib.Path(sys.argv[1])
+if root.stat().st_uid != os.getuid():
+    raise SystemExit('ci-buddy: root must belong to the installing user')
+root.chmod(0o700)
 limits = tomllib.loads((root / 'host.conf').read_text())
 required = {'jobs', 'slots', 'memory', 'cpus', 'min_free_gb', 'slot_max_gb', 'workers'}
 missing = required - limits.keys()
 if missing:
     raise SystemExit('ci-buddy: host.conf requires ' + ', '.join(sorted(missing)))
+if limits.keys() - required - {'keep_days'}:
+    raise SystemExit('ci-buddy: unknown host.conf settings')
+for name in ('jobs', 'slots', 'min_free_gb', 'slot_max_gb', 'keep_days'):
+    value = limits.get(name, 90) if name == 'keep_days' else limits[name]
+    if type(value) is not int or value <= 0:
+        raise SystemExit(f'ci-buddy: {name} must be a positive integer')
+if not isinstance(limits['memory'], str) or not limits['memory'].strip() or not isinstance(limits['cpus'], str):
+    raise SystemExit('ci-buddy: memory and cpus must be strings; only cpus may be empty')
+if not isinstance(limits['workers'], list) or any(not isinstance(endpoint, str) or ':' not in endpoint for endpoint in limits['workers']):
+    raise SystemExit('ci-buddy: workers must be an array of destination:root strings')
 if shutil.disk_usage(root).free < limits['min_free_gb'] * 10**9:
     raise SystemExit('ci-buddy: free disk is below min_free_gb')
 for directory in ('bin', 'containers', 'cargo', 'sccache', 'projects', 'pueue'):
-    (root / directory).mkdir(exist_ok=True)
+    path = root / directory
+    path.mkdir(exist_ok=True)
+    path.chmod(0o700)
 checksums = {
     'x86_64': ('c1b10d7e4e62211075ddd0e1dc3e8cbfc5a43d662cb3be7402a28504e23fcb51', '5afeff6adbafb909e8d54e2caff158e6966c2adffa2c09e60fd631cc51b60390'),
     'aarch64': ('759bf5100a51024997111c6913aaf3330a0cdfd893ff552dcf429ae9b5e01e09', '332c5ef74270b64aeaf04894c8c04826f3422eb7d50dbd1a8e0706d74a42f653'),
@@ -58,11 +74,23 @@ for template in pathlib.Path(sys.argv[2], 'units').iterdir():
 link = pathlib.Path.home() / '.ci-buddy'
 if not link.exists() and not link.is_symlink():
     link.symlink_to(root, target_is_directory=True)
+primary = link.resolve(strict=True)
+if primary != root:
+    # A second queue on this machine must join the first queue's exclusion.
+    for name in ('machine.lock', 'turnstile'):
+        target, path = primary / name, root / name
+        if not target.is_file():
+            raise SystemExit('ci-buddy: primary root has no machine locks')
+        if path.exists() or path.is_symlink():
+            if not path.exists() or not path.samefile(target):
+                raise SystemExit('ci-buddy: existing machine lock differs; drain this root before replacing it')
+        else:
+            path.symlink_to(target)
 PY
 [[ $(podman info --format '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}') == 'true v2' ]] || {
     echo 'ci-buddy requires rootless Podman with cgroup v2' >&2; exit 2;
 }
-for file in ci-buddy data.py history.py archive.py workers.py job.sh upkeep.sh; do
+for file in ci-buddy data.py history.py archive.py workers.py safe_output.py ssh.py job.sh upkeep.sh; do
     cp "$source_dir/$file" "$root/bin/$file.new"
     chmod +x "$root/bin/$file.new"
     mv "$root/bin/$file.new" "$root/bin/$file"
@@ -86,12 +114,9 @@ while not socket.is_socket():
     time.sleep(0.05)
 groups = json.loads(subprocess.check_output([pueue, 'group', '--json']))
 limits = tomllib.loads((root / 'host.conf').read_text())
-jobs = limits['jobs']
-for endpoint in limits['workers']:
-    host, worker_root = endpoint.split(':', 1)
-    command = ['python3', '-c', 'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["slots"])', str(pathlib.Path(worker_root, 'host.conf'))]
-    import shlex
-    jobs += int(subprocess.check_output(['ssh', host, shlex.join(command)]))
+# Scheduling lanes do not reserve machines. Each chosen host separately admits
+# no more than its jobs limit, even while an endpoint is unavailable at install.
+jobs = limits['jobs'] * (1 + len(limits['workers']))
 for group, parallel in (('jobs', jobs), ('exclusive', 1)):
     if group not in groups:
         subprocess.run([pueue, 'group', 'add', '--parallel', str(parallel), group], check=True)

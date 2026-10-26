@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import shutil
 import shlex
 import subprocess
@@ -17,6 +18,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
     assert Path(directory).resolve().parent == Path(tempfile.gettempdir()).resolve()
+    os.environ['GIT_CONFIG_GLOBAL'] = str(Path(directory, 'gitconfig'))
+    for allowed in sys.argv[1:]:
+        subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', allowed], check=True)
     source = Path(directory, "example")
     shutil.copytree(root / "example", source)
     # Earlier invocations must not satisfy this invocation's cache-miss assertions.

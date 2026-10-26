@@ -57,6 +57,14 @@ def project_config(repository, commit="HEAD"):
 
 
 command, *args = sys.argv[1:]
+if command == 'available':
+    root = Path(args[0])
+    limits = tomllib.loads((root / 'host.conf').read_text())
+    if shutil.disk_usage(root).free < limits['min_free_gb'] * 10**9:
+        raise SystemExit('free disk below configured floor')
+    subprocess.run([str(root / 'bin/pueue'), '--config', str(root / 'pueue.yml'), 'status', '--json'],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    sys.exit()
 if command in ("read", "field"):
     try:
         content = read_file(args[0])
@@ -80,6 +88,9 @@ elif command == "host":
 elif command == "job":
     folder, run, kind, commit, base, branch, submitter, *argv = args
     config = project_config(Path(folder, "git"), commit)
+    dispatched = argv[:1] == ["--worker"]
+    if dispatched:
+        argv = argv[1:]
     rerun = kind != "run" and argv[:1] == ["--rerun"]
     if rerun:
         argv = argv[1:]
@@ -87,8 +98,8 @@ elif command == "job":
         base, argv = argv[1], argv[2:]
     if kind not in ("run", "test", "gate", "bench"):
         raise ValueError(f"unknown job kind: {kind}")
-    exclusive = kind == "bench" or kind == "run" and argv[:1] == ["--exclusive"]
-    if kind == "run" and exclusive:
+    exclusive = kind == "bench" or kind in ("run", "gate") and argv[:1] == ["--exclusive"]
+    if kind in ("run", "gate") and exclusive:
         argv = argv[1:]
     if kind == "run" and argv[:1] == ["--"]:
         argv = argv[1:]
@@ -99,7 +110,8 @@ elif command == "job":
     job = dict(kind=kind, commit=commit, base=base, branch=branch, submitter=submitter,
                tree=git(Path(folder, "git"), "rev-parse", commit + "^{tree}"),
                argv=argv, key="", rerun=rerun, queued_at=time.time(), exclusive=exclusive,
-               bench_required=kind == "gate" and "bench" in config)
+               bench_required=kind == "gate" and "bench" in config,
+               dispatched=dispatched)
     if kind != "run":
         revision = read_file(Path(folder).parents[1] / "bin/revision").strip()
         inputs = [kind, job["tree"], argv, base if kind == "test" and not argv else "", revision]

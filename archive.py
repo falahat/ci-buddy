@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import safe_output
 
 out = Path(sys.argv[1])
 if sys.argv[2:] == ["log"]:
@@ -15,7 +16,7 @@ if sys.argv[2:] == ["log"]:
         with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
             for entry in archive:
                 if entry.isfile() and entry.name.endswith("runner.log"):
-                    shutil.copyfileobj(archive.extractfile(entry), sys.stdout.buffer)
+                    safe_output.stream(archive.extractfile(entry), sys.stdout)
         if process.wait():
             raise subprocess.CalledProcessError(process.returncode, process.args)
     sys.exit()

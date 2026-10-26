@@ -22,6 +22,12 @@ if [[ -z $prefix ]]; then
     else
         dispatched=$?
         if [[ $dispatched != 3 ]]; then
+            # A completed remote failure already has validated metrics/history.
+            if [[ -f $out/worker-exit ]]; then
+                remote_status=$(field worker-exit)
+                write_field exit "$remote_status"
+                exit "$remote_status"
+            fi
             write_field exit "$dispatched"
             python3 "$root/bin/data.py" stamp "$out" exit "$dispatched"
             python3 "$root/bin/data.py" stamp "$out" ended_at "$EPOCHREALTIME"

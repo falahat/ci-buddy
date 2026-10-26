@@ -17,10 +17,23 @@ supply sh, Rust, sccache, cargo-nextest and cargo-sweep, plus ssh for private fe
 Only listed image files enter the build context.
 
 Set host to an SSH destination, optionally followed by `:<root>` for another root.
-Fetch that root's `bin/ci-buddy` over SSH each time and invoke it with Bash:
+Install the reviewed client with `bash install-client.sh --host <destination>:<root>`.
+Repeat `--host` for each approved coordinator or leaf worker; `local:<root>`
+uses a local Linux queue without SSH. Endpoints live in the owner's global
+Git configuration (`ci-buddy.host`), outside submitted source. The project's
+`host` is a preference within that allowlist. The client skips unavailable or
+incompatible hosts before submission, then its coordinator picks an available
+warm worker. Use the same reviewed revision everywhere and update explicitly.
+A submission never downloads executable client code from a server.
+
+Invoke `bash "$HOME/.local/bin/ci-buddy"` (or add that directory to PATH):
 `run [--exclusive] -- <command>`, `test [arguments]`, `gate`, `verify <commit>`,
 `merge`, `status`, `log <run>` or `cancel <run>`. Tracked edits use Git stash objects;
 output streams and the exit status returns without polling or automatic retries.
+`status` and `history` show each available endpoint with provenance. `log`,
+`cancel`, `verify` and `merge` locate runs or gates across available endpoints.
+Unavailable history is identified, not silently treated as empty. After submit
+starts, a disconnect never causes automatic resubmission.
 A detached HEAD records an empty branch. Candidate refs disappear after checkout
 or when a job ends before checkout, including failed submissions and cancellation.
 
@@ -28,6 +41,7 @@ A green gate queues its optional exclusive bench in the same output folder.
 Correctness returns first. `verify` waits for both and prints their report.
 `merge` verifies clean HEAD, rejects a moved main and pushes without forcing.
 Exclusive jobs drain the machine, make data writable and allow CPU/NUMA profiling.
+`gate --exclusive` also serializes correctness for an isolated build measurement.
 
 Unlocked slots rank by commit distance, unknown last, then lowest number. Targets
 stay warm. Host Git metadata stays outside the writable checkout; jobs get a copy.
@@ -64,8 +78,9 @@ Daily upkeep locks each idle slot and runs cargo-sweep with seven-day age and
 slot_max_gb limits. Busy slots are skipped; maintenance respects exclusive work.
 
 Workers are SSH destinations with roots in host.conf's workers array. Install
-ci-buddy there first, provision project fetch secrets there, then reinstall the
-coordinator to include worker slots in its Pueue jobs capacity. Free worker
+ci-buddy there first, satisfy [the private access requirements](SECURITY.md),
+provision project fetch secrets there, then reinstall the coordinator to include
+configured workers in Pueue's scheduling capacity. Free worker
 slots join the commit-distance choice; the worker queues and locks the job.
 Output streams back and its archived run and SQLite results return to the
 coordinator. Cancellation follows the worker. Exclusive work and gates with a
@@ -77,3 +92,11 @@ endpoint configured to use the first endpoint as its worker.
 
 Install the same commit on coordinator and workers. The coordinator owns reuse;
 a newly dispatched request forces one fresh execution in the worker queue.
+
+SSH permits only private, loopback or tailnet addresses, with independently pinned
+host keys and separate machine keys. Proxies, forwarding and local SSH commands
+are disabled. Only connection establishment has a five-second bound; running
+jobs have no timeout and are never retried. Worker returns are bounded data,
+cannot overwrite local job identity, and are never executed. These controls do
+not configure host firewalls, cloud ingress or tailnet policy. Keep remote
+workers disabled until the owner verifies the denial checks in SECURITY.md.

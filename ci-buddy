@@ -1,5 +1,9 @@
 set -euo pipefail
 if [[ ${1:-} != --server ]]; then
+    client_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    if [[ -f $client_dir/revision ]]; then revision=$(<"$client_dir/revision")
+    else revision=$(git -C "$client_dir" rev-parse --verify HEAD); fi
+    [[ $revision =~ ^[0-9a-f]{40}$ ]] || exit 2
     cd "$(git rev-parse --show-toplevel)"
     while IFS= read -r line; do
         if [[ $line =~ ^(name|host|main)[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
@@ -7,24 +11,73 @@ if [[ ${1:-} != --server ]]; then
         fi
     done <ci-buddy.toml
     : "${name:?}" "${host:?}" "${main:?}"
-    destination=${host%%:*}; remote_root=.ci-buddy
-    [[ $host != *:* ]] || remote_root=${host#*:}
-    [[ -n $destination && -n $remote_root ]] || exit 2
     [[ $name =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
+    git check-ref-format "refs/heads/$main"
+    # Endpoints belong to owner configuration, never executable project input.
+    mapfile -t configured < <(git config --global --get-all ci-buddy.host || true)
+    ((${#configured[@]})) || { echo 'install a trusted client with bash install-client.sh --host <destination>[:<root>]' >&2; exit 2; }
+    transport=(python3 "$client_dir/ssh.py")
+    endpoint_parts() {
+        destination=${1%%:*}; remote_root=.ci-buddy
+        [[ $1 != *:* ]] || remote_root=${1#*:}
+        [[ $destination =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$ ]] || return 2
+        [[ $remote_root == .ci-buddy || $remote_root == /* ]] || return 2
+        [[ $remote_root != *$'\n'* && $remote_root != *$'\r'* ]] || return 2
+        [[ $destination != local || $remote_root != .ci-buddy ]] || remote_root=$HOME/.ci-buddy
+    }
+    invoke() {
+        local endpoint=$1; shift
+        endpoint_parts "$endpoint" || return
+        if [[ $destination == local ]]; then bash "$remote_root/bin/ci-buddy" --server "$name" "$@"
+        else "${transport[@]}" "$destination" "bash $(printf '%q' "$remote_root/bin/ci-buddy") --server $(printf '%q ' "$name" "$@")"; fi
+    }
+    available=()
+    # Probe every configured coordinator once; connection deadlines never kill jobs.
+    preferred=(); others=()
+    for endpoint in "${configured[@]}"; do
+        if [[ $endpoint == "$host" || $endpoint == "$host:.ci-buddy" ]]; then preferred+=("$endpoint")
+        else others+=("$endpoint"); fi
+    done
+    for endpoint in "${preferred[@]}" "${others[@]}"; do
+        if value=$(invoke "$endpoint" version 2>&1 | head -c 42) && [[ $value == "$revision" ]]; then
+            available+=("$endpoint")
+        else printf 'host unavailable or version differs: %s\n' "$endpoint" >&2; fi
+    done
+    ((${#available[@]})) || { echo 'no configured host available; no job submitted' >&2; exit 2; }
+    selected=${available[0]}
+    remote() {
+        invoke "$selected" "$@" 2>&1 | python3 "$client_dir/safe_output.py"
+        local statuses=("${PIPESTATUS[@]}")
+        ((statuses[1] == 0)) || return "${statuses[1]}"
+        return "${statuses[0]}"
+    }
     command=${1:?command required}; shift
-    remote() { ssh "$destination" "bash $(printf '%q' "$remote_root/bin/ci-buddy") --server $(printf '%q ' "$name" "$@")"; }
     case $command in
-        status|log|cancel) remote "$command" "$@"; exit $? ;;
-        history)
-            if [[ ${1:-} == change ]]; then
-                remote history change "$(git rev-parse "${2:?ref required}")" "$(git rev-parse "$2^{tree}")"
-            elif [[ ${1:-} == failures && ${2:-} == --range ]]; then
-                range=${3:?range required}
-                remote history failures --range "$(git rev-parse "${range%..*}")..$(git rev-parse "${range#*..}")"
-            else remote history "$@"; fi
-            exit $? ;;
-        verify) remote verify "$(git rev-parse "${1:?commit required}")"; exit $? ;;
-        merge)
+        status|history)
+            arguments=("$@")
+            if [[ $command == history && ${1:-} == change ]]; then
+                arguments=(change "$(git rev-parse "${2:?ref required}")" "$(git rev-parse "$2^{tree}")")
+            elif [[ $command == history && ${1:-} == failures && ${2:-} == --range ]]; then
+                range=${3:?range required}; arguments=(failures --range "$(git rev-parse "${range%..*}")..$(git rev-parse "${range#*..}")")
+            fi
+            result=0
+            for selected in "${available[@]}"; do
+                printf 'host=%s\n' "$selected"
+                remote "$command" "${arguments[@]}" || result=$?
+            done
+            exit "$result" ;;
+        log|cancel)
+            run=${1:?run required}; [[ $run =~ ^[0-9]+$ ]] || exit 2
+            found=false
+            for selected in "${available[@]}"; do if value=$(invoke "$selected" has-run "$run" 2>&1 | head -c 42); then found=true; break; fi; done
+            $found || { echo 'run not found on available hosts' >&2; exit 1; }
+            remote "$command" "$run"; exit $? ;;
+        verify|merge)
+            candidate=$(git rev-parse "${1:-HEAD}")
+            found=false
+            for selected in "${available[@]}"; do if value=$(invoke "$selected" has-gate "$candidate" 2>&1 | head -c 42); then found=true; break; fi; done
+            $found || { echo 'gate not found on available hosts' >&2; exit 1; }
+            if [[ $command == verify ]]; then remote verify "$candidate"; exit $?; fi
             git diff --quiet HEAD -- || { echo 'commit tracked edits before merge' >&2; exit 1; }
             candidate=$(git rev-parse HEAD)
             result=$(remote verify "$candidate") || { printf '%s\n' "$result"; exit 1; }
@@ -37,7 +90,7 @@ if [[ ${1:-} != --server ]]; then
             git push origin "$candidate:refs/heads/$main"
             exit $? ;;
         run|test|gate) ;;
-        *) echo "expected run, test, gate, verify, merge, status, log or cancel" >&2; exit 2 ;;
+        *) echo 'expected run, test, gate, verify, merge, status, log or cancel' >&2; exit 2 ;;
     esac
     if [[ $command == test ]]; then
         arguments=("$@")
@@ -61,9 +114,14 @@ if [[ ${1:-} != --server ]]; then
     branch=$(git symbolic-ref --quiet --short HEAD) || { status=$?; [[ $status == 1 ]] || exit "$status"; branch=""; }
     run=$((${EPOCHREALTIME/./} * 1000 + RANDOM % 1000))
     remote init
-    git push --quiet --no-verify "$destination:$remote_root/projects/$name/git" "$candidate:refs/ci-buddy/$run"
-    remote submit "$run" "$command" "$candidate" "$base" "$branch" "${CI_BUDDY_SUBMITTER:-$HOSTNAME}" "$@"
-    exit $?
+    endpoint_parts "$selected"
+    target=$remote_root/projects/$name/git
+    [[ $destination == local ]] || target=$destination:$target
+    GIT_SSH_COMMAND=$(printf '%q ' "${transport[@]}") GIT_SSH_VARIANT=simple git push --quiet --no-verify "$target" "$candidate:refs/ci-buddy/$run" 2>&1 | python3 "$client_dir/safe_output.py"
+    printf 'host=%s\n' "$selected"
+    # After submit begins, a lost connection is ambiguous: never fail over/retry.
+    if remote submit "$run" "$command" "$candidate" "$base" "$branch" "${CI_BUDDY_SUBMITTER:-$HOSTNAME}" "$@"; then exit 0
+    else status=$?; printf 'submission ended with status %s; inspect run %s on %s before submitting again\n' "$status" "$run" "$selected" >&2; exit "$status"; fi
 fi
 shift
 project=${1:?project required}; command=${2:?command required}; shift 2
@@ -95,6 +153,17 @@ wait_task() {
     ) 3>"$root/containers/recover-$project-$run.lock"
 }
 case $command in
+    version)
+        python3 "$data" available "$root"
+        cat "$root/bin/revision"
+        ;;
+    has-run)
+        [[ ${1:-} =~ ^[0-9]+$ && -d $folder/runs/$1 ]]
+        ;;
+    has-gate)
+        [[ ${1:-} =~ ^[0-9a-f]{40}$ ]] || exit 2
+        python3 "$data" gate "$folder" "$1"
+        ;;
     init)
         mkdir -p "$folder"/{slots,data,secrets,runs,logs}
         chmod 700 "$folder/secrets"
@@ -164,7 +233,7 @@ case $command in
             if [[ -f $folder/runs/$run/job.json ]]; then
                 worker=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("worker", ""))' "$folder/runs/$run/job.json")
                 if [[ -n $worker ]]; then
-                    ssh "${worker%%:*}" "bash $(printf '%q' "${worker#*:}/bin/ci-buddy") --server $(printf '%q ' "$project" cancel "$run")"
+                    python3 "$root/bin/ssh.py" "${worker%%:*}" "bash $(printf '%q' "${worker#*:}/bin/ci-buddy") --server $(printf '%q ' "$project" cancel "$run")"
                 fi
             fi
             stop_container() {
