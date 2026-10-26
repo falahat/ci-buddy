@@ -72,7 +72,7 @@ if command in ("read", "field"):
         if command == "read":
             raise
         sys.exit()
-    sys.stdout.write(str(int(content)) if command == "field" else content)
+        sys.stdout.write(str(int(content)) if command == "field" and content else content)
 elif command == "write":
     write_file(Path(args[0]), args[1] + "\n")
 elif command == "append":
