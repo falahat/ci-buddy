@@ -248,7 +248,9 @@ elif command == "report":
     started, ended, status = timing if timing else (job[stage + "started_at"], time.time(), 137)
     job[stage + "started_at"] = float(started)
     job[stage + "ended_at"], job[stage + "exit"] = float(ended), int(status)
+    write_file(output / "job.json", json.dumps(job))
     with open_file(output / "report.txt", "a") as report:
+        report.write(f"host_load={os.getloadavg()}\n")
         queued = job["bench_queued_at" if prefix else "queued_at"]
         report.write(f"{prefix}queue_s={float(started) - queued:.3f} run_s={float(ended) - float(started):.3f} exit={status}\n")
         phases = job.get(stage + "phases", []) + [["end", float(ended)]]

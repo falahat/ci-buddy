@@ -1,5 +1,6 @@
 import json
 import math
+import os
 from pathlib import Path
 import sqlite3
 import statistics
@@ -103,6 +104,7 @@ def record(folder, out, read_file):
 
 
 def query(folder, argv):
+    started = time.perf_counter()
     command, *args = argv
     allowed = {"test": (1,), "failures": (2,), "slowest": (0, 2), "change": (1, 2), "flaky": (0,), "gates": (0, 2)}
     if command not in allowed or len(args) not in allowed[command]:
@@ -174,4 +176,4 @@ def query(folder, argv):
             MAX(CASE WHEN t.name='phase/bench' THEN s.ms/1000 END) AS bench
             FROM runs r LEFT JOIN results s ON r.id=s.run LEFT JOIN tests t ON t.id=s.test WHERE ''' + where + ' GROUP BY r.id) GROUP BY day ORDER BY day')
     connection.close()
-    print(json.dumps(answer))
+    print(json.dumps(dict(answer=answer, query_s=time.perf_counter() - started, host_load=os.getloadavg())))

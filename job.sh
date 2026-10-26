@@ -22,7 +22,10 @@ finish() {
     status=$?
     archive=yes
     git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
-    python3 "$root/bin/data.py" report "$out" "$prefix" "$started" "$EPOCHREALTIME" "$status"
+    python3 "$root/bin/data.py" report "$out" "$prefix" "$started" "$EPOCHREALTIME" "$status" || {
+        status=1
+        python3 "$root/bin/data.py" stamp "$out" "${prefix//-/_}exit" "$status"
+    }
     python3 "$root/bin/data.py" record "$out"
     if [[ $status == 0 && $kind == gate && -n ${bench:-} ]]; then
         python3 "$root/bin/data.py" stamp "$out" bench_queued_at "$EPOCHREALTIME"
@@ -31,7 +34,7 @@ finish() {
         echo "bench_task=$id"
         archive=no
     fi
-    python3 "$root/bin/data.py" read "$out/report.txt"
+    python3 "$root/bin/data.py" read "$out/report.txt" || true
     exec 1>&8 2>&8
     wait "$logger"
     [[ $archive == no ]] || python3 "$root/bin/archive.py" "$out"

@@ -183,8 +183,9 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
     for question in (("test", "arithmetic::adds_unequal_values"), ("failures", "--branch", "main"),
                      ("slowest",), ("change", commit), ("flaky",), ("gates",)):
         started = time.monotonic()
-        answer = json.loads(call("history", *question))
+        answer = json.loads(call("history", *question))["answer"]
         assert time.monotonic() - started < 2 and isinstance(answer, (dict, list))
         assert answer or question[0] in ("failures", "flaky", "gates"), question
+        if question[0] == "test": assert answer["runs"] > 0
     assert refs() == baseline_refs, "a completed or cancelled candidate ref remains"
 print("example end-to-end: green")

@@ -162,7 +162,11 @@ case $command in
             [[ -n $task ]] || exit 0
             if pueue remove "$task"; then
                 write_field "${prefix}exit" 137
+                python3 "$data" stamp "$folder/runs/$run" "${prefix//-/_}exit" 137
+                python3 "$data" stamp "$folder/runs/$run" "${prefix//-/_}ended_at" "$EPOCHREALTIME"
                 python3 "$data" append "$folder/runs/$run/report.txt" 'cancelled before start; stats incomplete'
+                python3 "$data" record "$folder/runs/$run"
+                python3 "$root/bin/archive.py" "$folder/runs/$run"
                 git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
             elif [[ -n $task ]]; then
                 pueue kill "$task"
