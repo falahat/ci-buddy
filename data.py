@@ -263,12 +263,17 @@ elif command == "image":
                 raise ValueError(f"image path contains a symlink: {item}")
         if not path.is_file():
             raise ValueError(f"image file is missing: {item}")
+        recorded = git(repository, "--literal-pathspecs", "ls-tree", "--format=%(objectmode)", "HEAD", "--", item)
+        if recorded not in ("100644", "100755"):
+            raise ValueError(f"image file is not a tracked regular file: {item}")
+        mode = int(recorded, 8) & 0o777
         digest.update(item.encode() + b"\0")
-        digest.update((path.stat().st_mode & 0o777).to_bytes(4, "big"))
+        digest.update(mode.to_bytes(4, "big"))
         digest.update(hashlib.sha256(path.read_bytes()).digest())
         target = context / item
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
+        target.chmod(mode)
     emit(dict(image=f"ci-buddy-{project}:{digest.hexdigest()[:16]}", containerfile=config["image"][0],
               prepare=config.get("prepare", ""), wrapper=config.get("wrapper", ""),
               test=config["test"], gate=config.get("gate", ""), bench=config.get("bench", "")))

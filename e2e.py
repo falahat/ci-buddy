@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 
 root = Path(__file__).resolve().parent
 client = [shutil.which("bash"), (root / "ci-buddy").as_posix()]
@@ -37,6 +38,10 @@ with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(result.stdout, end="", flush=True)
         assert result.returncode == status, (arguments, result.returncode, status)
+        if arguments[0] == "history":
+            owner = tomllib.loads(config.read_text())["host"]
+            payload = result.stdout.split("host=" + owner + "\n", 1)[1]
+            return json.dumps(json.JSONDecoder().raw_decode(payload.lstrip())[0])
         return result.stdout
 
     def launch(*arguments):
@@ -140,7 +145,7 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
     verifying = launch("verify", commit)
     try:
         assert verifying.stdout.readline().startswith("waiting bench_task=")
-        run_probe("assert not (out / 'bench-exit').exists()\n(out / 'release').write_text('release')", run)
+        run_probe("assert not (out / 'bench-exit').read_text().strip()\n(out / 'release').write_text('release')", run)
         report = verifying.communicate()[0]
     finally:
         if verifying.poll() is None:
@@ -153,7 +158,7 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
     red = call("gate", status=1)
     run = run_id(red)
     assert "bench_task=" not in red, red
-    run_probe("assert not (out / 'bench-task').exists()", run)
+    run_probe("assert not (out / 'bench-task').read_text().strip()", run)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
     call("verify", commit, status=1)
     assert "reused_from=" not in call("test"), "changed tree reused an old result"
@@ -176,7 +181,7 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
                   "'wait','--status','running']+tasks,check=True)")
         queued = launch("run", "--", "true")
         queued_run = announced(queued)
-        run_probe("""assert not (out / 'slot').exists(), 'job fetched before cancellation'
+        run_probe("""assert not (out / 'slot').read_text().strip(), 'job fetched before cancellation'
 assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify','--quiet',
                        'refs/ci-buddy/'+sys.argv[2]]).returncode == 0""", queued_run)
         call("cancel", queued_run)
@@ -218,5 +223,19 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
         answer = json.loads(call("history", "change", commit))["answer"]
         assert answer, "worker result did not return to the coordinator history"
+        readonly = """import errno,os,sys
+from pathlib import Path
+print('worker-exit-three-once',flush=True)
+for name in ('job.json','task','slot','exit','bench-task','bench-exit','worker-exit'):
+    try:
+        descriptor = os.open(Path(os.environ['CI_BUDDY_OUT']) / name, os.O_WRONLY)
+    except OSError as error:
+        assert error.errno == errno.EROFS, (name,error)
+    else:
+        os.close(descriptor)
+        raise AssertionError('writable control: ' + name)
+sys.exit(3)"""
+        result = call("run", "--", "python3", "-c", readonly, status=3)
+        assert "worker_returned=" in result and result.count('worker-exit-three-once') == 1, result
     assert refs() == baseline_refs, "a completed or cancelled candidate ref remains"
 print("example end-to-end: green")
