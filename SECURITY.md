@@ -1,7 +1,9 @@
 # Private worker setup
 
-ci-buddy uses SSH, not a public job service. Installing it does not configure
-your network, SSH server, cloud account or firewall. Keep workers disabled until
+ci-buddy uses SSH, not a public job service. The queue installer does not configure
+your network, SSH server, cloud account or firewall. The separate owner-side
+[worker setup](WORKERS.md) prepares only approved dedicated worker images and
+checks the existing tailnet policy; it never replaces unrelated policy. Keep workers disabled until
 the access-denial checks below pass. A same-machine transport test cannot prove
 cross-machine isolation. Only approved devices and their private SSH keys may
 submit jobs or inspect logs; code you authorize on those devices has that power.
@@ -24,30 +26,23 @@ Tailscale SSH for job automation: that substitutes device identity for the
 separate local SSH key. Keep your identity-provider account protected by MFA,
 enable device approval, and let only your owner identity assign CI tags. No
 CI node is shared; no CI node advertises subnet or exit routes or uses Funnel.
-For a dedicated CI network, the complete Tailscale policy is:
+Keep existing laptop/coordinator identities. Merge only the narrow CI worker
+fragment into the owner-approved existing policy, preserving unrelated apps:
 
 ```json
 {
-  "tagOwners": {
-    "tag:ci-submitter": ["<owner-login>"],
-    "tag:ci-coordinator": ["<owner-login>"],
-    "tag:ci-worker": ["<owner-login>"]
-  },
-  "grants": [
-    {
-      "src": ["tag:ci-submitter"],
-      "dst": ["tag:ci-coordinator", "tag:ci-worker"],
-      "ip": ["tcp:22"]
-    },
-    {
-      "src": ["tag:ci-coordinator"],
-      "dst": ["tag:ci-worker"],
-      "ip": ["tcp:22"]
-    }
-  ],
-  "ssh": []
+  "tagOwners": {"tag:ci-worker": ["<owner-login>"]},
+  "grants": [{
+    "src": ["<approved-laptop-tailnet-ip>", "<approved-coordinator-tailnet-ip>"],
+    "dst": ["tag:ci-worker"],
+    "ip": ["tcp:22"]
+  }]
 }
 ```
+
+This is a fragment, not a replacement for the whole tailnet policy. The owner
+approves the complete existing policy export. Enrollment compares it with the
+owner API and runs native access tests using the approved peer IP identities.
 
 Tag only explicitly approved machines. In an existing network, audit the whole
 policy before merging these rules: grants are additive, and a broad existing
@@ -105,8 +100,8 @@ Run containers have no network. Image build, fetch and prepare need networking;
 their host networking rules must permit only required public package downloads
 and designated DNS, blocking private networks, host services, tailnet addresses
 and cloud metadata on both IP versions. Worker hosts hold no submitter key.
-Project deploy keys are read-only and fetch-only. ci-buddy neither provisions
-machines nor imposes a hard billing cap; retain at most the owner's authorized
+Project deploy keys are read-only and fetch-only. Normal jobs cannot provision
+machines. Owner-side creation does not impose a provider-wide billing cap; retain at most the owner's authorized
 instance count, and remember that stopped instances may still have disk costs.
 
 The credential-bearing fetch image is built from ci-buddy's installed recipe
