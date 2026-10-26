@@ -15,6 +15,14 @@ if [[ ${1:-} != --server ]]; then
     remote() { ssh "$destination" "bash $(printf '%q' "$remote_root/bin/ci-buddy") --server $(printf '%q ' "$name" "$@")"; }
     case $command in
         status|log|cancel) remote "$command" "$@"; exit $? ;;
+        history)
+            if [[ ${1:-} == change ]]; then
+                remote history change "$(git rev-parse "${2:?ref required}")" "$(git rev-parse "$2^{tree}")"
+            elif [[ ${1:-} == failures && ${2:-} == --range ]]; then
+                range=${3:?range required}
+                remote history failures --range "$(git rev-parse "${range%..*}")..$(git rev-parse "${range#*..}")"
+            else remote history "$@"; fi
+            exit $? ;;
         verify) remote verify "$(git rev-parse "${1:?commit required}")"; exit $? ;;
         merge)
             git diff --quiet HEAD -- || { echo 'commit tracked edits before merge' >&2; exit 1; }
@@ -70,6 +78,8 @@ wait_task() {
             podman wait "ci-buddy-$run" || podman wait "ci-buddy-prepare-$run" || podman wait "ci-buddy-fetch-$run" || true
             python3 "$data" report "$folder/runs/$run" "$prefix"
             write_field "${prefix}exit" 137
+            python3 "$data" record "$folder/runs/$run"
+            python3 "$root/bin/archive.py" "$folder/runs/$run"
             git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
         fi
     ) 3>"$root/containers/recover-$project-$run.lock"
@@ -86,15 +96,30 @@ case $command in
         # If submission fails before there is a queued task, no runner can clean the ref.
         trap '[[ -n ${id:-} ]] || git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"' EXIT
         mkdir "$folder/runs/$run"
+        exec 9>"$folder/submit.lock"; flock 9
         group=$(python3 "$data" job "$folder" "$run" "$@")
-        id=$(pueue add --stashed --print-task-id --group "$group" --label "$project/$run" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run")
+        reused=$(pueue status --json | python3 "$data" reuse "$folder" "$run")
+        if [[ -n $reused ]]; then
+            read -r state original id <<<"$reused"
+            flock -u 9
+            echo "reused_from=$original"
+            if [[ $state == finished ]]; then python3 "$data" read "$folder/runs/$run/report.txt"; exit "$(field exit)"; fi
+            run=$original
+            echo "run=$run task=$id"
+            pueue follow "$id" || true
+            wait_task "$id"; exit "$(field exit)"
+        fi
+        values=$(python3 "$data" load "$folder/runs/$run" ""); eval "$values"
+        id=$(pueue add --stashed --print-task-id --group "$group" --label "$project/$run/$key" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run")
         write_field task "$id"
         pueue enqueue "$id"
+        flock -u 9
         echo "run=$run task=$id"
         pueue follow "$id" || true
         wait_task "$id"
         exit "$(field exit)"
         ;;
+    history) python3 "$data" history "$folder" "$@" ;;
     verify)
         commit=${1:?commit required}
         run=$(python3 "$data" gate "$folder" "$commit")
@@ -123,9 +148,7 @@ case $command in
         run=${1:?run required}
         [[ $run =~ ^[0-9]+$ ]] || exit 2
         if [[ $command == log ]]; then
-            task=$(field task); bench_id=$(field bench-task)
-            ids=("$task"); [[ -z $bench_id ]] || ids+=("$bench_id")
-            pueue log "${ids[@]}"
+            python3 "$data" log "$folder" "$run"
         else
             stop_container() {
                 for container in "ci-buddy-$run" "ci-buddy-prepare-$run" "ci-buddy-fetch-$run"; do

@@ -42,5 +42,16 @@ Reports separate queue, checkout, image, fetch, prepare and command time and lab
 unaccounted time. CPU covers fetch/prepare/run; peak memory includes file cache.
 Missing statistics are marked incomplete; image-build CPU is excluded.
 
+Each project keeps SQLite history, including nextest JUnit results and failed
+phase excerpts. Ask `history test <name>`, `history failures --branch <branch>`
+(or `--range <base>..<tip>`), `history slowest [--since 7d]`,
+`history change <ref>`, `history flaky` or `history gates [--days 7]`.
+Logs use zstd archives; upkeep expires artifacts after keep_days and retains rows.
+
+Identical tests and gates reuse finished results or follow an existing task,
+naming its source run. The key covers kind, tree, arguments, the base of an
+unfiltered test, and the installed tool revision. `test --rerun` and `gate --rerun`
+force execution. Arbitrary `run --` commands always execute.
+
 Test candidates in an independently installed root while the shared root runs main.
 Check with `python3 check.py` and `python3 e2e.py <destination>:<private-root>`.

@@ -12,19 +12,29 @@ phase() { python3 "$root/bin/data.py" phase "$out" "${prefix//-/_}" "$1"; }
 prefix=""; [[ ${4:-} != bench ]] || prefix=bench-
 values=$(python3 "$root/bin/data.py" host "$root"); eval "$values"
 values=$(python3 "$root/bin/data.py" load "$out" "${4:-}"); eval "$values"
+python3 "$root/bin/data.py" write "$out/${prefix}runner.log" ''
+exec 8>&1
+exec > >(tee -a "$out/${prefix}runner.log") 2>&1
+logger=$!
 started=$EPOCHREALTIME
 started_field=started_at; [[ -z $prefix ]] || started_field=bench_started_at
 finish() {
     status=$?
+    archive=yes
     git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
     python3 "$root/bin/data.py" report "$out" "$prefix" "$started" "$EPOCHREALTIME" "$status"
+    python3 "$root/bin/data.py" record "$out"
     if [[ $status == 0 && $kind == gate && -n ${bench:-} ]]; then
         python3 "$root/bin/data.py" stamp "$out" bench_queued_at "$EPOCHREALTIME"
-        id=$(pueue add --print-task-id --group exclusive --after "$(field task)" --label "$project/$run/bench" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run" bench)
+        id=$(pueue add --print-task-id --group exclusive --after "$(field task)" --label "$project/$run/$key/bench" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run" bench)
         write_field bench-task "$id"
         echo "bench_task=$id"
+        archive=no
     fi
     python3 "$root/bin/data.py" read "$out/report.txt"
+    exec 1>&8 2>&8
+    wait "$logger"
+    [[ $archive == no ]] || python3 "$root/bin/archive.py" "$out"
     write_field "${prefix}exit" "$status"
 }
 trap finish EXIT
@@ -109,5 +119,13 @@ podman run "${common[@]}" "${limits[@]}" --name "ci-buddy-$run" --network=none -
     wrapper=$1; stats=$2; shift 2
     if [ -n "$wrapper" ]; then eval "set -- $wrapper \"\$@\""; fi
     "$@"; status=$?
+    # Copy only reports written by this command, while still inside its container.
+    for profile in target/nextest/*; do
+        junit=$profile/junit.xml
+        [ -f "$junit" ] && [ "$junit" -nt /work/out/job.json ] || continue
+        profile=${profile##*/}
+        mkdir -p "/work/out/junit/$profile"
+        cp -p "$junit" "/work/out/junit/$profile/junit.xml" || exit 1
+    done
     { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${stats}stats"
     exit "$status"' run "$wrapper" "$prefix" "${argv[@]}"

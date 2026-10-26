@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import tomllib
+import history
 
 
 def git(folder, *args):
@@ -78,6 +79,9 @@ elif command == "host":
 elif command == "job":
     folder, run, kind, commit, base, branch, submitter, *argv = args
     config = project_config(Path(folder, "git"), commit)
+    rerun = kind != "run" and argv[:1] == ["--rerun"]
+    if rerun:
+        argv = argv[1:]
     if kind not in ("run", "test", "gate", "bench"):
         raise ValueError(f"unknown job kind: {kind}")
     exclusive = kind == "bench" or kind == "run" and argv[:1] == ["--exclusive"]
@@ -91,14 +95,72 @@ elif command == "job":
         raise ValueError(f"{kind} requires its configured command and no arguments")
     job = dict(kind=kind, commit=commit, base=base, branch=branch, submitter=submitter,
                tree=git(Path(folder, "git"), "rev-parse", commit + "^{tree}"),
-               argv=argv, key="", queued_at=time.time(), exclusive=exclusive,
+               argv=argv, key="", rerun=rerun, queued_at=time.time(), exclusive=exclusive,
                bench_required=kind == "gate" and "bench" in config)
+    if kind != "run":
+        revision = read_file(Path(folder).parents[1] / "bin/revision").strip()
+        inputs = [kind, job["tree"], argv, base if kind == "test" and not argv else "", revision]
+        job["key"] = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
     write_file(Path(folder, "runs", run, "job.json"), json.dumps(job))
     print("exclusive" if exclusive else "jobs")
+elif command == "reuse":
+    folder, run = Path(args[0]), args[1]
+    out = folder / "runs" / run
+    job = json.loads(read_file(out / "job.json"))
+    tasks = json.load(sys.stdin)["tasks"]
+    if job["key"] and not job["rerun"]:
+        for task in tasks.values():
+            label = task.get("label") or ""
+            if "Done" not in task["status"] and label.startswith(folder.name + "/") and job["key"] in label.split("/"):
+                original = label.split("/")[1]
+                print("active", original, read_file(folder / "runs" / original / "task").strip())
+                git(folder / "git", "update-ref", "-d", "refs/ci-buddy/" + run)
+                shutil.rmtree(out)
+                sys.exit()
+        database = history.db(folder)
+        for row in database.execute('SELECT * FROM runs WHERE key=? AND reused_from IS NULL AND exit IS NOT NULL ORDER BY id DESC', (job["key"],)):
+            prior = dict(row)
+            complete = database.execute("SELECT 1 FROM results JOIN tests ON tests.id=results.test WHERE run=? AND name='phase/bench'", (prior["id"],)).fetchone()
+            if job["bench_required"] and prior["exit"] == 0 and not complete:
+                continue
+            original = prior["id"]
+            prior.update(id=int(run), commit=job["commit"], branch=job["branch"], submitter=job["submitter"],
+                         queued_at=job["queued_at"], started_at=time.time(), ended_at=time.time(), cpu_s=0, peak_bytes=None, reused_from=original)
+            columns = ','.join('"' + key + '"' for key in prior)
+            with database:
+                database.execute(f'INSERT INTO runs ({columns}) VALUES ({",".join("?" for _ in prior)})', tuple(prior.values()))
+                database.execute('INSERT INTO results SELECT test,?,status,ms,excerpt FROM results WHERE run=?', (int(run), original))
+            job.update(reused_from=original, exit=prior["exit"])
+            write_file(out / "job.json", json.dumps(job))
+            write_file(out / "exit", str(prior["exit"]))
+            if job["bench_required"]:
+                write_file(out / "bench-exit", str(prior["exit"]))
+            previous = folder / "runs" / str(original) / "report.txt"
+            report = read_file(previous) if previous.exists() else json.dumps(prior)
+            write_file(out / "report.txt", f"reused_from={original}\n{report}")
+            print("finished", original)
+            break
+elif command == "history":
+    history.query(Path(args[0]), args[1:])
+elif command == "log":
+    folder, run = Path(args[0]), args[1]
+    output = folder / "runs" / run
+    job = json.loads(read_file(output / "job.json"))
+    output = folder / "runs" / str(job.get("reused_from", run))
+    if (output / "exit").exists():
+        subprocess.run([sys.executable, str(folder.parents[1] / "bin/archive.py"), str(output), "log"], check=True)
+    else:
+        subprocess.run(["pueue", "log", "--full", read_file(output / "task").strip()], check=True)
+elif command == "record":
+    output = Path(args[0])
+    path = output / "job.json"
+    job = json.loads(read_file(path))
+    job["junit_ingested_at"] = history.record(output.parents[1], output, read_file)
+    write_file(path, json.dumps(job))
 elif command == "load":
     job = json.loads(read_file(Path(args[0], "job.json")))
     kind = args[1] or job["kind"]
-    values = {key: job[key] for key in ("commit", "base", "branch")}
+    values = {key: job[key] for key in ("commit", "base", "branch", "key")}
     values.update(kind=kind, exclusive=job["exclusive"] or kind == "bench", bench_required=job["bench_required"],
                   queued_at=job["bench_queued_at" if args[1] == "bench" else "queued_at"])
     emit(values)
@@ -127,8 +189,8 @@ elif command == "gate":
         raise SystemExit("no gate recorded for this commit")
 elif command == "task":
     for identifier, task in reversed(list(json.load(sys.stdin)["tasks"].items())):
-        if "Done" not in task["status"] and task["label"] in (args[0], f"{args[0]}/bench"):
-            print(identifier, "bench-" if task["label"] != args[0] else "")
+        if "Done" not in task["status"] and (task["label"] == args[0] or (task["label"] or "").startswith(args[0] + "/")):
+            print(identifier, "bench-" if task["label"].rsplit("/", 1)[-1] == "bench" else "")
             break
 elif command == "slots":
     repository, commit, count = args
@@ -206,6 +268,8 @@ elif command == "report":
         if totals:
             report.write(f"cpu_s={sum(s['usage_usec'] for s in totals) / 1000000:.3f} peak_bytes={max(s['memory_peak_bytes'] for s in totals)} cap_killed={sum(s['oom_kill'] for s in totals)} scope=fetch+prepare+run peak_includes_file_cache=true\n")
         expected = 3 if any(name == "prepare" for name, _ in phases) else 2
+        job[stage + "cpu_s"] = sum(s["usage_usec"] for s in totals) / 1000000 if len(totals) == expected else None
+        job[stage + "peak_bytes"] = max(s["memory_peak_bytes"] for s in totals) if len(totals) == expected else None
         if len(totals) != expected:
             report.write("stats incomplete\n")
     write_file(output / "job.json", json.dumps(job))
