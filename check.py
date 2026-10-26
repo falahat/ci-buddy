@@ -1,5 +1,4 @@
 from pathlib import Path
-import ipaddress
 import re
 import subprocess
 
@@ -20,24 +19,13 @@ for name in filter(None, names):
         line = re.sub(r"\b[a-z][a-z0-9+.-]*://\S+", "", line)
         # These single-character Bash substitutions cannot name a root.
         line = re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*//[-_]/[-_]\}", "", line)
-        if name == 'worker/startup.sh':
-            for value in re.findall(r'[0-9a-fA-F:.]+/\d+', line):
-                try:
-                    ipaddress.ip_network(value)
-                except ValueError:
-                    continue
-                line = line.replace(value, '')
         assert not drive.search(line) and not unc.search(line), (name, number, "absolute Windows path")
         for match in absolute.finditer(line):
             # Documentation's root placeholder names a caller-supplied path.
             if line[:match.start()].endswith("<root>"):
                 continue
             path = match.group()
-            native = ('/etc/os-release', '/etc/ssh', '/etc/apt/sources.list.d', '/usr/share/keyrings', '/dev/ttyS1', '/usr/sbin/sshd', '/bin/bash', '/dev/null')
-            prefixes = allowed + (native if name in ('worker/startup.sh', 'check.py') else ())
-            if name == 'install-client.sh':
-                prefixes += ('/dev/null',)
-            assert any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes), (name, number, path)
-assert code_lines < 2400, code_lines
+            assert any(path == prefix or path.startswith(prefix + "/") for prefix in allowed), (name, number, path)
+assert code_lines <= 1849, code_lines
 assert example_lines < 350, example_lines
 print(f"code_lines={code_lines} example_lines={example_lines}")

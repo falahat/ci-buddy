@@ -5,11 +5,6 @@ if [[ ${1:-} != --server ]]; then
     if [[ -f $client_dir/revision ]]; then revision=$(<"$client_dir/revision")
     else revision=$(git -C "$client_dir" rev-parse --verify HEAD); fi
     [[ $revision =~ ^[0-9a-f]{40}$ ]] || exit 2
-    if [[ ${1:-} == worker ]]; then
-        [[ ${2:-} == create ]] || { echo 'expected worker create' >&2; exit 2; }
-        shift 2
-        exec python3 "$client_dir/worker/create.py" "$@"
-    fi
     command=${1:?command required}; shift
     case $command in
         run|test|gate) probe=(version) ;;

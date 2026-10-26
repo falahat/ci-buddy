@@ -110,7 +110,37 @@ inside the output directory is read-only; use other filenames for artifacts.
 Reuse belongs to the selected coordinator; independent submissions to different
 coordinators during a partition can create independent runs.
 
-The owner may explicitly create a Google worker with `worker create`; see
-[WORKERS.md](WORKERS.md). Every machine uses the same installer and container
-runner. Jobs never provision capacity. Existing hosts keep native queues and
-benchmarks; there is no local VM or provisioning framework.
+## Adding a tailworker machine
+
+Machine creation, accounts, private networking and deploy keys belong to
+tailworker; follow its README and complete the owner's access checks first.
+ci-buddy runs the same installer and container runner on every machine.
+
+On the control host, the owner first reviews a dry run, then creates the
+machine explicitly. Repeat `--deploy-key` for each private dependency:
+
+```sh
+tailworker up gcp --name "$name" --hours 1 --dry-run \
+  --deploy-key "$dependency" \
+  --deploy-dir ".ci-buddy/projects/$project/secrets" --deploy-base /run/secrets
+```
+
+After creation, install the reviewed ci-buddy commit used by the coordinator.
+Prepare a leaf `worker.conf` with the ordinary explicit resource/disk limits
+and `workers = []`. From that ci-buddy checkout:
+
+```sh
+worker=tw-$name
+revision=$(git rev-parse HEAD)
+git archive --add-virtual-file=revision:"$revision" HEAD | \
+  ssh "$worker" 'mkdir -p ~/ci-buddy; tar -x -C ~/ci-buddy'
+ssh "$worker" 'umask 077; mkdir -p ~/.ci-buddy; cat >~/.ci-buddy/host.conf' <worker.conf
+ssh "$worker" 'bash ~/ci-buddy/install.sh --root "$HOME/.ci-buddy"'
+ssh "$worker" 'printf "%s\n" "$HOME/.ci-buddy"'
+```
+
+Use the last command's absolute root with the `tw-<name>` alias in the
+coordinator's `workers` array, then reinstall the coordinator once to update
+Pueue capacity. Its owner SSH configuration includes tailworker's aliases and
+pinned host keys. An offline worker fails the availability probe and work runs
+on the coordinator. Ordinary submissions never create or start machines.

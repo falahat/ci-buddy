@@ -15,30 +15,12 @@ if [[ -e $source_dir/.git ]]; then
     git -C "$source_dir" diff --quiet HEAD -- || {
         echo 'install the client from a committed, reviewed checkout' >&2; exit 2;
     }
-    git -C "$source_dir" ls-files --error-unmatch worker/create.py worker/startup.sh >/dev/null
     revision=$(git -C "$source_dir" rev-parse --verify HEAD)
 else revision=$(<"$source_dir/revision"); fi
 [[ $revision =~ ^[0-9a-f]{40}$ ]] || exit 2
 bundle=$HOME/.local/lib/ci-buddy/$revision
 mkdir -p "$bundle" "$HOME/.local/bin"
 for name in ci-buddy safe_output.py ssh.py; do cp "$source_dir/$name" "$bundle/$name"; done
-mkdir -p "$bundle/worker"
-for name in create.py startup.sh; do cp "$source_dir/worker/$name" "$bundle/worker/$name"; done
-python3 - "$source_dir" "$bundle/runtime.tar" "$revision" <<'PY'
-import io, pathlib, sys, tarfile
-source, destination = map(pathlib.Path, sys.argv[1:3])
-names = ('ci-buddy data.py history.py archive.py workers.py safe_output.py ssh.py '
-         'fetch.Containerfile fetch.sh job.sh upkeep.sh install.sh install-client.sh worker/create.py worker/startup.sh').split()
-names += ['units/' + name for name in ('ci-buddy-pueued@.service', 'ci-buddy-upkeep@.service', 'ci-buddy-upkeep@.timer')]
-with tarfile.open(destination, 'w') as archive:
-    for name in names:
-        if (source / name).is_symlink():
-            raise ValueError('reviewed runtime contains a link')
-        archive.add(source / name, arcname=name, recursive=False)
-    value = (sys.argv[3] + '\n').encode()
-    entry = tarfile.TarInfo('revision'); entry.size = len(value); entry.mode = 0o600
-    archive.addfile(entry, io.BytesIO(value))
-PY
 printf '%s\n' "$revision" >"$bundle/revision"
 printf 'exec bash %q "$@"\n' "$bundle/ci-buddy" >"$HOME/.local/bin/ci-buddy"
 chmod 700 "$HOME/.local/bin/ci-buddy"
