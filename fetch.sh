@@ -39,6 +39,7 @@ def source_file(member, destination):
 
 try:
     snapshot = Path('/work/src')
+    snapshot.mkdir(exist_ok=True)
     if any(snapshot.iterdir()):
         raise ValueError('trusted fetch source directory must start empty')
     with tempfile.TemporaryFile(dir='/tmp') as archive:
