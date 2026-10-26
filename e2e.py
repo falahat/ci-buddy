@@ -5,6 +5,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 
 root = Path(__file__).resolve().parent
 client = [shutil.which("bash"), (root / "ci-buddy").as_posix()]
@@ -18,6 +19,9 @@ with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
     assert Path(directory).resolve().parent == Path(tempfile.gettempdir()).resolve()
     source = Path(directory, "example")
     shutil.copytree(root / "example", source)
+    # Earlier invocations must not satisfy this invocation's cache-miss assertions.
+    with (source / "arithmetic/src/lib.rs").open("a", encoding="utf-8") as stream:
+        stream.write("\n// E2E candidate " + Path(directory).name + ".\n")
     config = source / "ci-buddy.toml"
     config.write_text(config.read_text().replace('host = ""', "host = " + json.dumps(endpoint)))
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=source, check=True)
@@ -78,7 +82,11 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
     finally:
         config.write_text(original)
     call("run", "--", "sh", "-c", "exit 23", status=23)
-    call("test")
+    test_run = run_id(call("test", "--rerun"))
+    started = time.monotonic()
+    assert "reused_from=" + test_run in call("test") and time.monotonic() - started < 5
+    assert "reused_from=" not in call("test", "--rerun")
+    assert "reused_from=" not in call("test", "-E", "all()"), "changed argv reused an old result"
     call("run", "--", "sh", "-c", "test ! -e /run/secrets && test -f \"$CI_BUDDY_OUT/prepare.txt\"")
     call("run", "--", "python3", "-c", "import socket; socket.create_connection(('192.0.2.1',9))", status=1)
 
@@ -113,7 +121,7 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
     call("run", "--", "sh", "-c",
          '! printf wrong >"$CI_BUDDY_DATA/probe"; test "$(cat "$CI_BUDDY_DATA/probe")" = readable')
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
-    gate = call("gate")
+    gate = call("gate", "--rerun")
     run = run_id(gate)
     verifying = launch("verify", commit)
     try:
@@ -134,11 +142,13 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
     run_probe("assert not (out / 'bench-task').exists()", run)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
     call("verify", commit, status=1)
+    assert "reused_from=" not in call("test"), "changed tree reused an old result"
 
     # Fill this root's jobs group with only our own holders, then cancel a queued ref.
     count = int(run_probe("print(tomllib.loads((root / 'host.conf').read_text())['jobs'])").strip())
     holders = []
     queued = None
+    twins = []
     try:
         for _ in range(count):
             holder = launch("run", "--", "python3", "-c",
@@ -154,6 +164,11 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
         assert queued.returncode == 137, queued.returncode
         run_probe("""assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify','--quiet',
                        'refs/ci-buddy/'+sys.argv[2]]).returncode == 1""", queued_run)
+        with (source / "arithmetic/src/lib.rs").open("a", encoding="utf-8") as stream:
+            stream.write("\n// Reuse control " + Path(directory).name + ".\n")
+        subprocess.run(author + ["commit", "-qam", "reuse control"], cwd=source, check=True)
+        twins = [launch("test", "-E", "test(adds_unequal_values)") for _ in range(2)]
+        assert len({announced(twin) for twin in twins}) == 1, "identical queued requests ran twice"
     finally:
         if queued is not None and queued.poll() is None:
             call("cancel", queued_run)
@@ -162,5 +177,13 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
             if holder.poll() is None:
                 call("cancel", holder_run)
             holder.communicate()
+    twin_outputs = [twin.communicate()[0] for twin in twins]
+    assert all(twin.returncode == 0 for twin in twins) and all("reused_from=" not in text for text in twin_outputs)
+    for question in (("test", "arithmetic::adds_unequal_values"), ("failures", "--branch", "main"),
+                     ("slowest",), ("change", commit), ("flaky",), ("gates",)):
+        started = time.monotonic()
+        answer = json.loads(call("history", *question))
+        assert time.monotonic() - started < 2 and isinstance(answer, (dict, list))
+        assert answer or question[0] in ("failures", "flaky", "gates"), question
     assert refs() == baseline_refs, "a completed or cancelled candidate ref remains"
 print("example end-to-end: green")
