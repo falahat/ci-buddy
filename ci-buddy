@@ -112,7 +112,7 @@ case $command in
             read -r state original id <<<"$reused"
             flock -u 9
             echo "reused_from=$original"
-            if [[ $state == finished ]]; then python3 "$data" read "$folder/runs/$run/report.txt"; exit "$(field exit)"; fi
+            if [[ $state == finished ]]; then python3 "$root/bin/archive.py" "$folder/runs/$run"; python3 "$data" read "$folder/runs/$run/report.txt"; exit "$(field exit)"; fi
             run=$original
             echo "run=$run task=$id"
             pueue follow "$id" || true
@@ -128,6 +128,7 @@ case $command in
         wait_task "$id"
         exit "$(field exit)"
         ;;
+    distance|export) python3 "$root/bin/workers.py" "$command" "$root" "$project" "$1" ;;
     history) python3 "$data" history "$folder" "$@" ;;
     verify)
         commit=${1:?commit required}
@@ -159,6 +160,12 @@ case $command in
         if [[ $command == log ]]; then
             python3 "$data" log "$folder" "$run"
         else
+            if [[ -f $folder/runs/$run/job.json ]]; then
+                worker=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("worker", ""))' "$folder/runs/$run/job.json")
+                if [[ -n $worker ]]; then
+                    ssh "${worker%%:*}" "bash $(printf '%q' "${worker#*:}/bin/ci-buddy") --server $(printf '%q ' "$project" cancel "$run")"
+                fi
+            fi
             stop_container() {
                 for container in "ci-buddy-$run" "ci-buddy-prepare-$run" "ci-buddy-fetch-$run"; do
                     if podman container exists "$container"; then podman kill "$container"; return; fi

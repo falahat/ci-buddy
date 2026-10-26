@@ -12,6 +12,22 @@ phase() { python3 "$root/bin/data.py" phase "$out" "${prefix//-/_}" "$1"; }
 prefix=""; [[ ${4:-} != bench ]] || prefix=bench-
 values=$(python3 "$root/bin/data.py" host "$root"); eval "$values"
 values=$(python3 "$root/bin/data.py" load "$out" "${4:-}"); eval "$values"
+free=$(df --output=avail -B1 "$root" | tail -1)
+((free >= min_free_gb * 1000000000)) || { echo "disk below ${min_free_gb} GB floor"; exit 2; }
+if [[ -z $prefix ]]; then
+    # Dispatch before taking local machine locks; the worker takes its own.
+    if python3 "$root/bin/workers.py" dispatch "$root" "$project" "$run"; then
+        exit 0
+    else
+        dispatched=$?
+        if [[ $dispatched != 3 ]]; then
+            write_field exit "$dispatched"
+            python3 "$root/bin/data.py" stamp "$out" exit "$dispatched"
+            python3 "$root/bin/data.py" record "$out"
+            exit "$dispatched"
+        fi
+    fi
+fi
 python3 "$root/bin/data.py" write "$out/${prefix}runner.log" ''
 exec 8>&1
 exec > >(tee -a "$out/${prefix}runner.log") 2>&1
@@ -41,8 +57,6 @@ finish() {
     write_field "${prefix}exit" "$status"
 }
 trap finish EXIT
-free=$(df --output=avail -B1 "$root" | tail -1)
-((free >= min_free_gb * 1000000000)) || { echo "disk below ${min_free_gb} GB floor"; exit 2; }
 exec 5>"$folder/picker.lock"
 flock 5
 order=$(python3 "$root/bin/data.py" slots "$folder/git" "$commit" "$slots")
@@ -101,6 +115,7 @@ podman run "${common[@]}" --name "ci-buddy-fetch-$run" --preserve-fds=2 \
     { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${1}fetch-stats"
     exit "$status"' fetch "$prefix"
 limits=(); [[ -z $cpus ]] || limits=(--cpus "$cpus")
+[[ ! -f $root/sccache.env ]] || limits+=(--env-file "$root/sccache.env")
 dependencies=(-v "$root/cargo/registry:/work/cargo/registry:ro" -v "$root/cargo/git:/work/cargo/git:ro")
 if [[ -n $prepare ]]; then
     phase prepare

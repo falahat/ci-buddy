@@ -196,5 +196,14 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
         assert time.monotonic() - started < 2 and isinstance(answer, (dict, list))
         assert answer or question[0] in ("failures", "flaky", "gates"), question
         if question[0] == "test": assert answer["runs"] > 0
+    if len(sys.argv) > 2:
+        # Provision the second endpoint with this root in its workers first.
+        config.write_text(original.replace(endpoint, sys.argv[2]))
+        subprocess.run(author + ["commit", "-qam", "worker coordinator"], cwd=source, check=True)
+        worker = call("test", "--rerun", "-p", "consumer")
+        assert "worker=" in worker and "worker_returned=" in worker
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
+        answer = json.loads(call("history", "change", commit))["answer"]
+        assert answer, "worker result did not return to the coordinator history"
     assert refs() == baseline_refs, "a completed or cancelled candidate ref remains"
 print("example end-to-end: green")

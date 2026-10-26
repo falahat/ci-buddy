@@ -62,7 +62,7 @@ PY
 [[ $(podman info --format '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}') == 'true v2' ]] || {
     echo 'ci-buddy requires rootless Podman with cgroup v2' >&2; exit 2;
 }
-for file in ci-buddy data.py history.py archive.py job.sh upkeep.sh; do
+for file in ci-buddy data.py history.py archive.py workers.py job.sh upkeep.sh; do
     cp "$source_dir/$file" "$root/bin/$file.new"
     chmod +x "$root/bin/$file.new"
     mv "$root/bin/$file.new" "$root/bin/$file"
@@ -85,7 +85,13 @@ while not socket.is_socket():
     subprocess.run(['systemctl', '--user', 'is-active', '--quiet', sys.argv[2]], check=True)
     time.sleep(0.05)
 groups = json.loads(subprocess.check_output([pueue, 'group', '--json']))
-jobs = tomllib.loads((root / 'host.conf').read_text())['jobs']
+limits = tomllib.loads((root / 'host.conf').read_text())
+jobs = limits['jobs']
+for endpoint in limits['workers']:
+    host, worker_root = endpoint.split(':', 1)
+    command = ['python3', '-c', 'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["slots"])', str(pathlib.Path(worker_root, 'host.conf'))]
+    import shlex
+    jobs += int(subprocess.check_output(['ssh', host, shlex.join(command)]))
 for group, parallel in (('jobs', jobs), ('exclusive', 1)):
     if group not in groups:
         subprocess.run([pueue, 'group', 'add', '--parallel', str(parallel), group], check=True)

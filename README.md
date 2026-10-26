@@ -60,6 +60,17 @@ An unfiltered `test` compares the candidate with its main merge base (or
 `--since <ref>`), then uses nextest rdeps for changed packages. Shared paths
 select all tests; explicit nextest arguments keep the caller's selection.
 Reports give touched packages and runnable selected/total counts.
-
 Daily upkeep locks each idle slot and runs cargo-sweep with seven-day age and
 slot_max_gb limits. Busy slots are skipped; maintenance respects exclusive work.
+
+Workers are SSH destinations with roots in host.conf's workers array. Install
+ci-buddy there first, provision project fetch secrets there, then reinstall the
+coordinator to include worker slots in its Pueue jobs capacity. Free worker
+slots join the commit-distance choice; the worker queues and locks the job.
+Output streams back and its archived run and SQLite results return to the
+coordinator. Cancellation follows the worker. Exclusive work and gates with a
+bench remain on their coordinator so executables and comparison data share a
+host. There is no automatic retry or cloud provisioning. Optional sccache.env
+is passed to prepare/run containers; never store project fetch credentials there.
+To exercise workers in the end-to-end test, give e2e.py a second coordinator
+endpoint configured to use the first endpoint as its worker.
