@@ -72,7 +72,10 @@ def install(root, token):
 
 
 def client(arguments):
+    endpoints = subprocess.check_output(['git', 'config', '--global', '--get-all', 'ci-buddy.host']).decode().splitlines()
     if arguments:
+        if set(arguments) - set(endpoints):
+            raise ValueError('credential destination is outside the approved host pool')
         selected, *available = arguments
         expected = subprocess.run(['git', 'config', '--global', '--get', 'ci-buddy.token'],
                                   stdout=subprocess.PIPE, check=False).stdout.strip()
@@ -88,9 +91,6 @@ def client(arguments):
                     rpc(selected, 'install', token)
                 return
         raise ValueError('enrolled token unavailable on approved hosts; run ci-buddy auth')
-    endpoints = subprocess.check_output(['git', 'config', '--global', '--get-all', 'ci-buddy.host']).decode().splitlines()
-    if not endpoints:
-        raise ValueError('configure approved hosts before enrolling a token')
     warnings.simplefilter('error', getpass.GetPassWarning)
     token = validate(getpass.getpass('GitHub token (selected repositories, Contents: read-only): ').encode())
     subprocess.run(['git', 'config', '--global', 'ci-buddy.token', hashlib.sha256(token).hexdigest()], check=True)

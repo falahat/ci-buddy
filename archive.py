@@ -2,7 +2,6 @@ import datetime
 import os
 from pathlib import Path
 import stat
-import shutil
 import subprocess
 import sys
 import tarfile

@@ -3,7 +3,6 @@ import copy
 import io
 import json
 from pathlib import Path
-import subprocess
 import sys
 import tarfile
 import tempfile

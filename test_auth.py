@@ -45,6 +45,9 @@ class Credentials(unittest.TestCase):
         self.assertNotIn(self.token.decode(), output.getvalue())
         self.assertNotIn(self.token, (self.root / 'owner.gitconfig').read_bytes())
         new = self.host('new')
+        with self.assertRaises(ValueError):
+            auth.client(['local:' + str(new), endpoint])
+        subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', 'local:' + str(new)], check=True)
         auth.client(['local:' + str(new), endpoint])
         self.assertEqual(auth.read(new), self.token)
         self.token = ('github_pat_' + secrets.token_hex(40)).encode()
