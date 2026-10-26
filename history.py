@@ -168,6 +168,8 @@ def query(folder, argv):
         answer = select('SELECT t.name,r.tree,COUNT(*) AS runs' + join + " WHERE " + where + " AND t.name NOT LIKE 'phase/%' AND s.status IN ('passed','failed') GROUP BY t.id,r.tree HAVING COUNT(DISTINCT s.status)=2 ORDER BY t.name,r.tree")
     else:
         answer = select('''SELECT strftime('%Y-%m-%d',ended_at,'unixepoch') AS day,COUNT(*) AS gates,
+            MIN(started_at) AS first_started_at,MAX(ended_at) AS last_ended_at,
+            median(correctness+bench) AS total_s,MAX(correctness+bench) AS max_total_s,
             median(started_at-queued_at) AS queue_s,median(correctness) AS correctness_s,
             median(bench_wait) AS bench_wait_s,median(bench) AS bench_s
             FROM (SELECT r.id,r.ended_at,r.started_at,r.queued_at,

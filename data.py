@@ -82,6 +82,8 @@ elif command == "job":
     rerun = kind != "run" and argv[:1] == ["--rerun"]
     if rerun:
         argv = argv[1:]
+    if kind == "test" and argv[:1] == ["--since"]:
+        base, argv = argv[1], argv[2:]
     if kind not in ("run", "test", "gate", "bench"):
         raise ValueError(f"unknown job kind: {kind}")
     exclusive = kind == "bench" or kind == "run" and argv[:1] == ["--exclusive"]
@@ -158,6 +160,23 @@ elif command == "record":
     job["junit_ingested_at"] = history.record(output.parents[1], output, read_file)
     write_file(path, json.dumps(job))
     print(f"history_bytes={(output.parents[1] / 'history.sqlite').stat().st_size}")
+elif command == "affected":
+    output, repository = map(Path, args)
+    job = json.loads(read_file(output / "job.json"))
+    metadata = json.loads(read_file(output / "metadata.json"))
+    packages = [(Path(p["manifest_path"]).relative_to("/work/src").parent, p["name"]) for p in metadata["packages"]]
+    changed = list(filter(None, git(repository, "diff", "--name-only", "--no-renames", "-z", job["base"], job["commit"]).split("\0")))
+    touched, shared = set(), False
+    for name in changed:
+        owners = [(len(path.parts), package) for path, package in packages if Path(name).is_relative_to(path)]
+        if not owners or name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml") or name.split("/")[0] in (".cargo", ".config"):
+            shared = True
+        else:
+            touched.add(max(owners)[1])
+    expression = "all()" if shared or not touched else " + ".join("rdeps(=" + name + ")" for name in sorted(touched))
+    job["touched_packages"], job["selection"] = sorted(touched), expression if not job["argv"] else "explicit"
+    write_file(output / "job.json", json.dumps(job))
+    emit(dict(affected=expression if not job["argv"] else ""))
 elif command == "load":
     job = json.loads(read_file(Path(args[0], "job.json")))
     kind = args[1] or job["kind"]
@@ -169,7 +188,7 @@ elif command == "load":
 elif command == "stamp":
     path = Path(args[0], "job.json")
     job = json.loads(read_file(path))
-    job[args[1]] = float(args[2])
+    job[args[1]] = (int if args[1].endswith("exit") else float)(args[2])
     write_file(path, json.dumps(job))
 elif command == "phase":
     path = Path(args[0], "job.json")
@@ -252,6 +271,12 @@ elif command == "report":
     write_file(output / "job.json", json.dumps(job))
     with open_file(output / "report.txt", "a") as report:
         report.write(f"host_load={os.getloadavg()}\n")
+        if job["kind"] == "test" and (output / "all-tests.json").exists():
+            counts = []
+            for name in ("all-tests", "selected-tests"):
+                listing = json.loads(read_file(output / (name + ".json")))
+                counts.append(sum(not case["ignored"] and case["filter-match"]["status"] == "matches" for suite in listing["rust-suites"].values() for case in suite["testcases"].values()))
+            report.write(f"touched_packages={job['touched_packages']} selection={job['selection']} selected={counts[1]} total={counts[0]} scope=runnable\n")
         queued = job["bench_queued_at" if prefix else "queued_at"]
         report.write(f"{prefix}queue_s={float(started) - queued:.3f} run_s={float(ended) - float(started):.3f} exit={status}\n")
         phases = job.get(stage + "phases", []) + [["end", float(ended)]]

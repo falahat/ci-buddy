@@ -39,6 +39,15 @@ if [[ ${1:-} != --server ]]; then
         run|test|gate) ;;
         *) echo "expected run, test, gate, verify, merge, status, log or cancel" >&2; exit 2 ;;
     esac
+    if [[ $command == test ]]; then
+        arguments=("$@")
+        for ((i=0; i<${#arguments[@]}; i++)); do
+            if [[ ${arguments[i]} == --since ]]; then
+                i=$((i+1)); arguments[i]=$(git rev-parse "${arguments[i]:?base required}")
+            fi
+        done
+        set -- "${arguments[@]}"
+    fi
     candidate=$(git rev-parse HEAD)
     changed=0
     git diff --quiet HEAD -- || changed=$?

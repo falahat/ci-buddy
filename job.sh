@@ -111,7 +111,16 @@ if [[ -n $prepare ]]; then
         exit "$status"' prepare "$prepare" "$prefix"
 fi
 case $kind in
-    test) argv=(bash -c "$test \"\$@\"" test "${argv[@]}") ;;
+    test)
+        values=$(python3 "$root/bin/data.py" affected "$out" "$slot/git"); eval "$values"
+        argv=(bash -c '
+            command=$1; affected=$2; shift 2
+            listing=${command/nextest run/nextest list}
+            bash -c "$listing --message-format json" >"$CI_BUDDY_OUT/all-tests.json" || exit $?
+            [[ -z $affected ]] || set -- "$@" -E "$affected"
+            bash -c "$listing --message-format json \"\$@\"" list "$@" >"$CI_BUDDY_OUT/selected-tests.json" || exit $?
+            bash -c "$command \"\$@\"" test "$@"
+        ' test "$test" "$affected" "${argv[@]}") ;;
     gate|bench) argv=(bash -c "${!kind}") ;;
 esac
 data_mode=ro
