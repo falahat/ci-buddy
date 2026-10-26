@@ -17,6 +17,7 @@ free=$(df --output=avail -B1 "$root" | tail -1)
 if [[ -z $prefix ]]; then
     # Dispatch before taking local machine locks; the worker takes its own.
     if python3 "$root/bin/workers.py" dispatch "$root" "$project" "$run"; then
+        write_field exit 0
         exit 0
     else
         dispatched=$?
