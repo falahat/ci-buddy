@@ -83,7 +83,8 @@ def record(folder, out, read_file):
         values["exit"] = job.get("bench_exit")
     values["ended_at"] = job.get("bench_ended_at", values["ended_at"])
     try:
-        values["slot"] = int(read_file(out / "slot"))
+        slot = read_file(out / "slot")
+        values["slot"] = int(slot) if slot else None
     except FileNotFoundError:
         values["slot"] = None
     if "bench_ended_at" in job:

@@ -108,6 +108,15 @@ Project deploy keys are read-only and fetch-only. ci-buddy neither provisions
 machines nor imposes a hard billing cap; retain at most the owner's authorized
 instance count, and remember that stopped instances may still have disk costs.
 
+The credential-bearing fetch image is built from ci-buddy's installed recipe
+and script alone, using a separate content hash and image lock. No project
+image, ENTRYPOINT or tool runs with the key mounted. Only registry and Git
+cache subdirectories are mounted into the fetch Cargo home, so mutable cached
+Cargo-home configuration is absent. Its two regular native lock files are
+shared too, retaining Cargo's concurrent-fetch locking. Prepare and run use the project image
+without credentials; fetch uses the trusted entrypoint and neutralizes project
+toolchain and Cargo configuration before invoking its installed toolchain.
+
 Before enabling an endpoint, the owner verifies:
 
 1. Approved submission, streaming, history and cancellation succeed using the

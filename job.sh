@@ -21,13 +21,13 @@ if [[ -z $prefix ]]; then
         exit 0
     else
         dispatched=$?
+        remote_status=$(field worker-exit)
+        if [[ -n $remote_status ]]; then
+            # Completed work takes precedence over the local-routing sentinel.
+            write_field exit "$remote_status"
+            exit "$remote_status"
+        fi
         if [[ $dispatched != 3 ]]; then
-            # A completed remote failure already has validated metrics/history.
-            if [[ -f $out/worker-exit ]]; then
-                remote_status=$(field worker-exit)
-                write_field exit "$remote_status"
-                exit "$remote_status"
-            fi
             write_field exit "$dispatched"
             python3 "$root/bin/data.py" stamp "$out" exit "$dispatched"
             python3 "$root/bin/data.py" stamp "$out" ended_at "$EPOCHREALTIME"
@@ -115,29 +115,64 @@ if ! podman image exists "$image"; then
     podman build --memory="$memory" --memory-swap="$memory" -t "$image" -f "$slot/context/$containerfile" "$slot/context"
 fi
 flock -u 7
+fetch_hash=$(cat "$root/bin/fetch.Containerfile" "$root/bin/fetch.sh" | sha256sum)
+fetch_image="ci-buddy-fetch:${fetch_hash%% *}"
+exec 7>"$root/containers/$fetch_image.lock"
+flock 7
+if ! podman image exists "$fetch_image"; then
+    fetch_context=$root/containers/fetch-${fetch_hash%% *}
+    mkdir -p "$fetch_context"
+    # The credential-bearing image contains installed code, never project files.
+    cp "$root/bin/fetch.Containerfile" "$root/bin/fetch.sh" "$fetch_context/"
+    podman build --memory="$memory" --memory-swap="$memory" -t "$fetch_image" \
+        -f "$fetch_context/fetch.Containerfile" "$fetch_context"
+fi
+flock -u 7
 common=(--rm --init --hostname "$(hostname)" --memory="$memory" --memory-swap="$memory" --pids-limit=8192
-    -v "$slot/src:/work/src" -v "$out:/work/out" -v "$root/sccache:/work/sccache" -w /work/src
+    -v "$out:/work/out"
     -e CARGO_HOME=/work/cargo -e RUSTC_WRAPPER=sccache -e SCCACHE_DIR=/work/sccache
     -e "CI_BUDDY_PROJECT=$project" -e "CI_BUDDY_RUN=$run" -e "CI_BUDDY_KIND=$kind"
     -e "CI_BUDDY_COMMIT=$commit" -e "CI_BUDDY_BASE=$base" -e CI_BUDDY_OUT=/work/out -e CI_BUDDY_DATA=/work/data)
+python3 - "$out" <<'PY'
+import os, stat, sys
+for name in ('task', 'slot', 'exit', 'bench-task', 'bench-exit', 'worker-exit'):
+    path = os.path.join(sys.argv[1], name)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
+    os.close(descriptor)
+    if not regular:
+        raise ValueError('control file must be regular')
+PY
+for control in job.json task slot exit bench-task bench-exit worker-exit; do
+    common+=(-v "$out/$control:/work/out/$control:ro")
+done
+project_mounts=(-v "$slot/src:/work/src" -v "$root/sccache:/work/sccache" -w /work/src)
 # Podman inherits descriptors 3 (slot) and 4 (machine). Its processes keep the
 # flock descriptions alive even if the host runner dies; every step inherits both.
 phase fetch
+python3 - "$root/cargo" <<'PY'
+import os, stat, sys
+for name in ('.package-cache', '.package-cache-mutate'):
+    descriptor = os.open(os.path.join(sys.argv[1], name), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
+    os.close(descriptor)
+    if not regular:
+        raise ValueError('Cargo cache lock must be a regular file')
+PY
 podman run "${common[@]}" --name "ci-buddy-fetch-$run" --preserve-fds=2 \
-    -v "$root/cargo:/work/cargo" -v "$folder/data:/work/data" -v "$folder/secrets:/run/secrets:ro" \
+    -v "$slot/git:/work/repository:ro" -w /tmp \
+    -v "$root/cargo/registry:/work/cargo/registry" -v "$root/cargo/git:/work/cargo/git" \
+    -v "$root/cargo/.package-cache:/work/cargo/.package-cache" -v "$root/cargo/.package-cache-mutate:/work/cargo/.package-cache-mutate" \
+    -v "$folder/secrets:/run/secrets:ro" \
     -e GIT_CONFIG_GLOBAL=/run/secrets/gitconfig -e 'GIT_SSH_COMMAND=ssh -F /run/secrets/ssh/config' \
-    -e CARGO_NET_GIT_FETCH_WITH_CLI=true "$image" sh -c '
-    cargo fetch --locked && cargo metadata --locked --no-deps --format-version 1 > /work/out/metadata.json
-    status=$?
-    { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${1}fetch-stats"
-    exit "$status"' fetch "$prefix"
+    -e CARGO_NET_GIT_FETCH_WITH_CLI=true --entrypoint bash "$fetch_image" /work/fetch.sh "$prefix"
 limits=(); [[ -z $cpus ]] || limits=(--cpus "$cpus")
 [[ ! -f $root/sccache.env ]] || limits+=(--env-file "$root/sccache.env")
 dependencies=(-v "$root/cargo/registry:/work/cargo/registry:ro" -v "$root/cargo/git:/work/cargo/git:ro")
 if [[ -n $prepare ]]; then
     phase prepare
     podman run "${common[@]}" "${limits[@]}" --name "ci-buddy-prepare-$run" --preserve-fds=2 \
-        "${dependencies[@]}" -v "$folder/data:/work/data" "$image" sh -c '
+        "${project_mounts[@]}" "${dependencies[@]}" -v "$folder/data:/work/data" "$image" sh -c '
         eval "$1"; status=$?
         { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${2}prepare-stats"
         exit "$status"' prepare "$prepare" "$prefix"
@@ -161,7 +196,7 @@ data_mode=ro
 if [[ $exclusive == True ]]; then limits+=(--security-opt seccomp=unconfined); data_mode=rw; fi
 phase command
 podman run "${common[@]}" "${limits[@]}" --name "ci-buddy-$run" --network=none --preserve-fds=2 "${dependencies[@]}" \
-    -v "$folder/data:/work/data:$data_mode" -e CARGO_NET_OFFLINE=true "$image" sh -c '
+    "${project_mounts[@]}" -v "$folder/data:/work/data:$data_mode" -e CARGO_NET_OFFLINE=true "$image" sh -c '
     wrapper=$1; stats=$2; shift 2
     if [ -n "$wrapper" ]; then eval "set -- $wrapper \"\$@\""; fi
     "$@"; status=$?

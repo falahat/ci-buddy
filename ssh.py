@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 
-OPTIONS = ['-T', '-x', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+OPTIONS = ['-q', '-T', '-x', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
            '-o', 'PreferredAuthentications=publickey', '-o', 'IdentitiesOnly=yes',
            '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',
            '-o', 'PermitLocalCommand=no', '-o', 'ProxyCommand=none', '-o', 'ProxyJump=none',
@@ -81,6 +81,8 @@ if __name__ == '__main__':
         if len(sys.argv) != 3:
             raise ValueError('usage: ssh.py <destination> <remote-command>')
         argv = command(*sys.argv[1:])
+        if os.name == 'nt':
+            sys.exit(subprocess.call(argv))
         os.execvp(argv[0], argv)
     except (OSError, subprocess.CalledProcessError, ValueError, KeyError) as error:
         print(f'ci-buddy private SSH: {error}', file=sys.stderr)

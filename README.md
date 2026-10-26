@@ -93,10 +93,19 @@ endpoint configured to use the first endpoint as its worker.
 Install the same commit on coordinator and workers. The coordinator owns reuse;
 a newly dispatched request forces one fresh execution in the worker queue.
 
-SSH permits only private, loopback or tailnet addresses, with independently pinned
+Job transport SSH permits only private, loopback or tailnet addresses, with independently pinned
 host keys and separate machine keys. Proxies, forwarding and local SSH commands
 are disabled. Only connection establishment has a five-second bound; running
 jobs have no timeout and are never retried. Worker returns are bounded data,
 cannot overwrite local job identity, and are never executed. These controls do
 not configure host firewalls, cloud ingress or tailnet policy. Keep remote
 workers disabled until the owner verifies the denial checks in SECURITY.md.
+
+Fetch runs in a separately built trusted image with a fixed Cargo toolchain,
+using a safe snapshot of tracked files and ignoring project Cargo/rustup config.
+Project images never receive credentials. Reviewed registry settings may live
+in the owner's `secrets/cargo-config.toml`; ordinary source configuration is
+restored implicitly by running builds in the normal checkout. Control metadata
+inside the output directory is read-only; use other filenames for artifacts.
+Reuse belongs to the selected coordinator; independent submissions to different
+coordinators during a partition can create independent runs.

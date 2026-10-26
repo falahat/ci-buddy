@@ -272,7 +272,7 @@ def main():
         report = out / 'worker-results' / 'report.txt'
         (out / 'report.txt').write_text(safe_output.clean(report.read_text(errors='replace')) if report.exists()
                                       else f'worker={job["worker"]} exit={status}\n')
-        with (out / 'worker-exit').open('x') as marker:
+        with (out / 'worker-exit').open('w') as marker:
             marker.write(str(status))
     print('worker_returned=' + identifier, flush=True)
     sys.exit(status)

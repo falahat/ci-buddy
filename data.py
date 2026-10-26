@@ -117,6 +117,8 @@ elif command == "job":
         inputs = [kind, job["tree"], argv, base if kind == "test" and not argv else "", revision]
         job["key"] = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
     write_file(Path(folder, "runs", run, "job.json"), json.dumps(job))
+    for name in ('task', 'slot', 'exit', 'bench-task', 'bench-exit', 'worker-exit'):
+        write_file(Path(folder, 'runs', run, name), '')
     print("exclusive" if exclusive else "jobs")
 elif command == "reuse":
     folder, run = Path(args[0]), args[1]

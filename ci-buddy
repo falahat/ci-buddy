@@ -1,5 +1,6 @@
 set -euo pipefail
 if [[ ${1:-} != --server ]]; then
+    [[ -n ${BASH_SOURCE[0]:-} ]] || { echo 'replace the downloaded shim; use the installed local ci-buddy client' >&2; exit 2; }
     client_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
     if [[ -f $client_dir/revision ]]; then revision=$(<"$client_dir/revision")
     else revision=$(git -C "$client_dir" rev-parse --verify HEAD); fi
@@ -230,6 +231,7 @@ case $command in
         if [[ $command == log ]]; then
             python3 "$data" log "$folder" "$run"
         else
+            if [[ -n $(field exit) && ( -z $(field bench-task) || -n $(field bench-exit) ) ]]; then exit 0; fi
             if [[ -f $folder/runs/$run/job.json ]]; then
                 worker=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("worker", ""))' "$folder/runs/$run/job.json")
                 if [[ -n $worker ]]; then
