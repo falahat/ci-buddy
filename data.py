@@ -157,6 +157,7 @@ elif command == "record":
     job = json.loads(read_file(path))
     job["junit_ingested_at"] = history.record(output.parents[1], output, read_file)
     write_file(path, json.dumps(job))
+    print(f"history_bytes={(output.parents[1] / 'history.sqlite').stat().st_size}")
 elif command == "load":
     job = json.loads(read_file(Path(args[0], "job.json")))
     kind = args[1] or job["kind"]

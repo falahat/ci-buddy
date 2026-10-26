@@ -49,6 +49,7 @@ try:
         if status:
             raise subprocess.CalledProcessError(status, process.args)
     temporary.replace(destination)
+    print(f"log_bytes={destination.stat().st_size}")
     for path in logs:
         path.unlink()
 finally:
