@@ -87,7 +87,7 @@ class Credentials(unittest.TestCase):
         root = self.host('coordinator')
         subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', 'local:' + str(root)], check=True)
         master, terminal = os.openpty()
-        process = subprocess.Popen([sys.executable, str(Path(__file__).with_name('auth.py')), 'client'],
+        process = subprocess.Popen(['bash', str(Path(__file__).with_name('ci-buddy')), 'auth'],
                                    stdin=terminal, stdout=terminal, stderr=terminal, start_new_session=True)
         transcript = b''
         try:
