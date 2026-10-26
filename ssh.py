@@ -1,7 +1,9 @@
 """Private SSH transport. Never impose a deadline on a submitted command."""
 import ipaddress
 import os
+from pathlib import Path
 import socket
+import stat
 import subprocess
 import sys
 
@@ -15,6 +17,19 @@ OPTIONS = ['-T', '-x', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
 NETWORKS = tuple(ipaddress.ip_network((address, bits)) for address, bits in (
     ('127.0.0.0', 8), ('10.0.0.0', 8), ('172.16.0.0', 12),
     ('192.168.0.0', 16), ('100.64.0.0', 10), ('::1', 128), ('fc00::', 7)))
+
+
+def configuration():
+    path = Path(__file__).resolve().parent.parent / 'ssh_config'
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return []
+    # Native Windows mode bits cannot establish this POSIX ownership contract.
+    uid = os.getuid() if hasattr(os, 'getuid') else None
+    if uid is None or not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & 0o077:
+        raise ValueError('ssh_config must be an owned private regular file, without a symlink')
+    return ['-F', str(path)]
 
 
 def private_address(hostname, port):
@@ -35,7 +50,8 @@ def private_address(hostname, port):
 def command(destination, remote):
     if not destination or destination.startswith('-') or any(c.isspace() for c in destination):
         raise ValueError('invalid SSH destination')
-    effective = subprocess.check_output(['ssh', '-G', *OPTIONS, destination], text=True)
+    selected = configuration()
+    effective = subprocess.check_output(['ssh', *selected, '-G', *OPTIONS, destination], text=True)
     config = {}
     identities = []
     for line in effective.splitlines():
@@ -56,7 +72,7 @@ def command(destination, remote):
     identities = [part for identity in identities
                   for part in ('-i', identity.replace('%h', hostname))]
     user = ['-l', config['user']] if 'user' in config else []
-    return ['ssh', *OPTIONS, '-p', str(port), *user, '-o', 'HostName=' + address, '-o', 'HostKeyAlias=' + alias,
+    return ['ssh', *selected, *OPTIONS, '-p', str(port), *user, '-o', 'HostName=' + address, '-o', 'HostKeyAlias=' + alias,
             *identities, destination, remote]
 
 

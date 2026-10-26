@@ -16,7 +16,7 @@ else
 fi
 [[ $revision =~ ^[0-9a-f]{40}$ ]] || { echo 'ci-buddy: invalid installed revision' >&2; exit 2; }
 python3 - "$root" "$source_dir" <<'PY'
-import hashlib, json, os, pathlib, platform, shutil, sys, tomllib, urllib.request
+import hashlib, json, os, pathlib, platform, shutil, subprocess, sys, tomllib, urllib.request
 root = pathlib.Path(sys.argv[1])
 if root.stat().st_uid != os.getuid():
     raise SystemExit('ci-buddy: root must belong to the installing user')
@@ -69,8 +69,10 @@ if not storage.exists():
     'client:\n  read_local_logs: false\n')
 units = config_home / 'systemd' / 'user'
 units.mkdir(parents=True, exist_ok=True)
+instance = subprocess.check_output(['systemd-escape', '--path', str(root)], text=True).strip()
 for template in pathlib.Path(sys.argv[2], 'units').iterdir():
-    shutil.copyfile(template, units / template.name)
+    # Exact instance files leave every other root's template and units alone.
+    shutil.copyfile(template, units / template.name.replace('@.', '@' + instance + '.'))
 link = pathlib.Path.home() / '.ci-buddy'
 if not link.exists() and not link.is_symlink():
     link.symlink_to(root, target_is_directory=True)

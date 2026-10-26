@@ -86,6 +86,13 @@ The shared transport enforces pinned host keys, private destination addresses
 and disabled SSH proxies; it refuses public endpoints. Those checks do not
 establish the tailnet and host-firewall denials below.
 
+An optional `<root>/ssh_config` supplies native OpenSSH configuration through
+`-F` without changing global SSH files; the local client bundle supports the
+same file beside its `bin` folder. It must be an owned regular file with no
+group/other permissions and no symlink (normally mode 0600). When absent,
+OpenSSH uses its usual configuration. Native Windows cannot verify that POSIX
+ownership contract and rejects the optional file; use WSL for that setup.
+
 Host firewalls enforce the same allowlist on both IPv4 and IPv6 and deny worker
 connections through ordinary LAN interfaces too. Expose no public CI SSH,
 dashboard, Pueue endpoint, database, container socket or metrics port, and no
