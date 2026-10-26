@@ -57,8 +57,17 @@ finish() {
     write_field "${prefix}exit" "$status"
 }
 trap finish EXIT
-exec 5>"$folder/picker.lock"
+exec 5>"$root/containers/picker.lock"
 flock 5
+# Worker capacity must not let local builds exceed this host's jobs limit.
+if [[ $exclusive != True ]]; then
+    admission=$(python3 "$root/bin/data.py" admit "$root" "$jobs")
+    if [[ -n $admission ]]; then
+        exec 7>"$admission"
+        flock 7
+        flock -u 7
+    fi
+fi
 order=$(python3 "$root/bin/data.py" slots "$folder/git" "$commit" "$slots")
 chosen=""
 for slot in $order; do

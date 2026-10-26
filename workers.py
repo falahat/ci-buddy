@@ -15,7 +15,10 @@ import history
 def distance(root, project, commit):
     folder = root / 'projects' / project
     choices = []
-    for slot in range(1, tomllib.loads((root / 'host.conf').read_text())['slots'] + 1):
+    limits = tomllib.loads((root / 'host.conf').read_text())
+    if subprocess.check_output([sys.executable, str(root / 'bin/data.py'), 'admit', str(root), str(limits['jobs'])]).strip():
+        return (10**13, 0)
+    for slot in range(1, limits['slots'] + 1):
         path = folder / 'slots' / str(slot)
         path.mkdir(parents=True, exist_ok=True)
         with (path / 'lock').open('a') as lock:

@@ -154,16 +154,22 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
     call("verify", commit, status=1)
     assert "reused_from=" not in call("test"), "changed tree reused an old result"
 
-    # Fill this root's jobs group with only our own holders, then cancel a queued ref.
+    # An exclusive holder keeps these queued workers from blocking other exclusives.
     count = int(run_probe("print(tomllib.loads((root / 'host.conf').read_text())['jobs'])").strip())
+    barrier = launch("run", "--exclusive", "--", "python3", "-c",
+                     "import signal; print('holder-ready',flush=True); signal.pause()")
+    barrier_run = announced(barrier, "holder-ready")
     holders = []
     queued = None
     twins = []
     try:
         for _ in range(count):
-            holder = launch("run", "--", "python3", "-c",
-                            "import signal; print('holder-ready',flush=True); signal.pause()")
-            holders.append((holder, announced(holder, "holder-ready")))
+            holder = launch("run", "--", "true")
+            holders.append((holder, announced(holder)))
+        run_probe("tasks = [(project / 'runs' / run / 'task').read_text().strip() for run in " +
+                  repr([run for _, run in holders]) + "]\n" +
+                  "subprocess.run([str(root/'bin/pueue'),'--config',str(root/'pueue.yml'),"
+                  "'wait','--status','running']+tasks,check=True)")
         queued = launch("run", "--", "true")
         queued_run = announced(queued)
         run_probe("""assert not (out / 'slot').exists(), 'job fetched before cancellation'
@@ -187,6 +193,9 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
             if holder.poll() is None:
                 call("cancel", holder_run)
             holder.communicate()
+        if barrier.poll() is None:
+            call("cancel", barrier_run)
+        barrier.communicate()
     twin_outputs = [twin.communicate()[0] for twin in twins]
     assert all(twin.returncode == 0 for twin in twins) and all("reused_from=" not in text for text in twin_outputs)
     for question in (("test", "arithmetic::adds_unequal_values"), ("failures", "--branch", "main"),

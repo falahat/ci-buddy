@@ -1,3 +1,4 @@
+import fcntl
 import hashlib
 import json
 import os
@@ -212,6 +213,16 @@ elif command == "task":
         if "Done" not in task["status"] and (task["label"] == args[0] or (task["label"] or "").startswith(args[0] + "/")):
             print(identifier, "bench-" if task["label"].rsplit("/", 1)[-1] == "bench" else "")
             break
+elif command == "admit":
+    busy = []
+    for path in Path(args[0], "projects").glob(str(Path("*", "slots", "*", "lock"))):
+        with open_file(path, "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                busy.append(path)
+    if len(busy) >= int(args[1]):
+        print(busy[0])
 elif command == "slots":
     repository, commit, count = args
     distances = []
