@@ -5,6 +5,12 @@ if [[ ${1:-} != --server ]]; then
     if [[ -f $client_dir/revision ]]; then revision=$(<"$client_dir/revision")
     else revision=$(git -C "$client_dir" rev-parse --verify HEAD); fi
     [[ $revision =~ ^[0-9a-f]{40}$ ]] || exit 2
+    command=${1:?command required}; shift
+    case $command in
+        run|test|gate) probe=(version) ;;
+        status|history|log|cancel|verify|merge) probe=(version --read-only) ;;
+        *) echo 'expected run, test, gate, verify, merge, status, log or cancel' >&2; exit 2 ;;
+    esac
     cd "$(git rev-parse --show-toplevel)"
     while IFS= read -r line; do
         if [[ $line =~ ^(name|host|main)[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
@@ -40,7 +46,7 @@ if [[ ${1:-} != --server ]]; then
         else others+=("$endpoint"); fi
     done
     for endpoint in "${preferred[@]}" "${others[@]}"; do
-        if value=$(invoke "$endpoint" version 2>&1 | head -c 42) && [[ $value == "$revision" ]]; then
+        if value=$(invoke "$endpoint" "${probe[@]}" 2>&1 | head -c 42) && [[ $value == "$revision" ]]; then
             available+=("$endpoint")
         else printf 'host unavailable or version differs: %s\n' "$endpoint" >&2; fi
     done
@@ -52,7 +58,6 @@ if [[ ${1:-} != --server ]]; then
         ((statuses[1] == 0)) || return "${statuses[1]}"
         return "${statuses[0]}"
     }
-    command=${1:?command required}; shift
     case $command in
         status|history)
             arguments=("$@")
@@ -155,7 +160,8 @@ wait_task() {
 }
 case $command in
     version)
-        python3 "$data" available "$root"
+        if (($# == 0)); then python3 "$data" available "$root"
+        else [[ $# == 1 && ${1:-} == --read-only ]] || exit 2; fi
         cat "$root/bin/revision"
         ;;
     has-run)

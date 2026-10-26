@@ -87,9 +87,10 @@ and disabled SSH proxies; it refuses public endpoints. Those checks do not
 establish the tailnet and host-firewall denials below.
 
 An optional `<root>/ssh_config` supplies native OpenSSH configuration through
-`-F` without changing global SSH files; the local client bundle supports the
-same file beside its `bin` folder. It must be an owned regular file with no
-group/other permissions and no symlink (normally mode 0600). When absent,
+`-F` without changing global SSH files. The installed local client reads
+`~/.local/lib/ci-buddy/ssh_config`, shared by its revision bundles.
+It must be an owned regular file with no group/other permissions and no symlink
+(normally mode 0600). When absent,
 OpenSSH uses its usual configuration. Native Windows cannot verify that POSIX
 ownership contract and rejects the optional file; use WSL for that setup.
 
