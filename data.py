@@ -147,7 +147,7 @@ elif command == "log":
     output = folder / "runs" / run
     job = json.loads(read_file(output / "job.json"))
     output = folder / "runs" / str(job.get("reused_from", run))
-    if (output / "exit").exists():
+    if any((folder / "logs").glob("*/" + output.name + ".tar.zst")):
         subprocess.run([sys.executable, str(folder.parents[1] / "bin/archive.py"), str(output), "log"], check=True)
     else:
         subprocess.run(["pueue", "log", "--full", read_file(output / "task").strip()], check=True)
