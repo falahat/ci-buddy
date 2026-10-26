@@ -34,10 +34,9 @@ def read(root):
 
 def store(root, token):
     validate(token)
-    with tempfile.NamedTemporaryFile(dir=root, delete=False) as stream:
+    with tempfile.NamedTemporaryFile(dir=root, delete=False) as stream:  # creates mode 0600
         temporary = Path(stream.name)
         try:
-            os.fchmod(stream.fileno(), 0o600)
             stream.write(token)
             stream.flush()
             temporary.replace(root / 'github-token')
