@@ -60,3 +60,6 @@ An unfiltered `test` compares the candidate with its main merge base (or
 `--since <ref>`), then uses nextest rdeps for changed packages. Shared paths
 select all tests; explicit nextest arguments keep the caller's selection.
 Reports give touched packages and runnable selected/total counts.
+
+Daily upkeep locks each idle slot and runs cargo-sweep with seven-day age and
+slot_max_gb limits. Busy slots are skipped; maintenance respects exclusive work.

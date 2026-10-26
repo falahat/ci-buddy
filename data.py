@@ -75,7 +75,7 @@ elif command == "host":
     if config.keys() - allowed:
         raise ValueError(f"unknown host settings: {config.keys() - allowed}")
     config.setdefault("keep_days", 90)
-    emit({key: config[key] for key in ("jobs", "slots", "memory", "cpus", "min_free_gb", "keep_days")})
+    emit({key: config[key] for key in ("jobs", "slots", "memory", "cpus", "min_free_gb", "slot_max_gb", "keep_days")})
 elif command == "job":
     folder, run, kind, commit, base, branch, submitter, *argv = args
     config = project_config(Path(folder, "git"), commit)
