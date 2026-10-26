@@ -92,7 +92,7 @@ PY
 [[ $(podman info --format '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}') == 'true v2' ]] || {
     echo 'ci-buddy requires rootless Podman with cgroup v2' >&2; exit 2;
 }
-for file in ci-buddy data.py history.py archive.py workers.py safe_output.py ssh.py fetch.Containerfile fetch.sh job.sh upkeep.sh; do
+for file in ci-buddy data.py history.py archive.py workers.py safe_output.py ssh.py auth.py fetch.Containerfile fetch.sh job.sh upkeep.sh; do
     cp "$source_dir/$file" "$root/bin/$file.new"
     chmod +x "$root/bin/$file.new"
     mv "$root/bin/$file.new" "$root/bin/$file"

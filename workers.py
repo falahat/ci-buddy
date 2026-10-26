@@ -1,6 +1,4 @@
-import codecs
 import fcntl
-import io
 import math
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -16,6 +14,8 @@ import time
 import tomllib
 import history
 import safe_output
+from ssh import receive, capture
+import auth
 
 SSH = [sys.executable, str(Path(__file__).with_name('ssh.py'))]
 
@@ -50,37 +50,6 @@ HISTORY_LIMIT = 16 * 1024 * 1024
 RUN_COLUMNS = ('id', 'kind', 'key', 'tree', 'commit', 'branch', 'submitter',
                'slot', 'argv', 'queued_at', 'started_at', 'ended_at', 'exit',
                'cpu_s', 'peak_bytes', 'reused_from')
-
-
-def receive(command, destination, limit, display=False):
-    # Bound bytes, not execution time. No transport failure resubmits a job.
-    decoder = codecs.getincrementaldecoder('utf-8')('replace')
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
-        try:
-            total = 0
-            while block := process.stdout.read1(min(65536, limit - total + 1)):
-                total += len(block)
-                if total > limit:
-                    raise ValueError('worker output exceeds size limit')
-                destination.write(block)
-                if display:
-                    print(safe_output.clean(decoder.decode(block)), end='', flush=True)
-            if display:
-                print(safe_output.clean(decoder.decode(b'', final=True)), end='', flush=True)
-        except BaseException:
-            process.terminate()
-            raise
-        finally:
-            process.stdout.close()
-        return process.wait()
-
-
-def capture(command, limit=4096):
-    output = io.BytesIO()
-    status = receive(command, output, limit)
-    if status:
-        raise subprocess.CalledProcessError(status, command)
-    return output.getvalue()
 
 
 def unpack_results(archive_path, destination):
@@ -196,6 +165,9 @@ def main():
                 raise ValueError('version differs')
             subprocess.run(SSH + [host, shlex.join(server + ['init'])], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            token = auth.read(root)
+            if token:
+                auth.rpc(endpoint, 'store', token)
             staged = True
             subprocess.run(['git', '-C', str(folder / 'git'), 'push', '--quiet',
                 host + ':' + str(Path(worker_root, 'projects', project, 'git')), job['commit'] + ':refs/ci-buddy/' + identifier],

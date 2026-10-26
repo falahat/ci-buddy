@@ -159,7 +159,12 @@ for name in ('.package-cache', '.package-cache-mutate'):
     if not regular:
         raise ValueError('Cargo cache lock must be a regular file')
 PY
-podman run "${common[@]}" --name "ci-buddy-fetch-$run" --preserve-fds=2 \
+token=()
+if [[ -e $root/github-token || -L $root/github-token ]]; then
+    python3 "$root/bin/auth.py" check
+    token=(-v "$root/github-token:/work/token:ro")
+fi
+podman run "${common[@]}" "${token[@]}" --name "ci-buddy-fetch-$run" --preserve-fds=2 \
     -v "$slot/git:/work/repository:ro" -w /tmp \
     -v "$root/cargo/registry:/work/cargo/registry" -v "$root/cargo/git:/work/cargo/git" \
     -v "$root/cargo/.package-cache:/work/cargo/.package-cache" -v "$root/cargo/.package-cache-mutate:/work/cargo/.package-cache-mutate" \

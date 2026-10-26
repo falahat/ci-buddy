@@ -106,7 +106,7 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
     assert "reused_from=" + test_run in call("test") and time.monotonic() - started < 5
     assert "reused_from=" not in call("test", "--rerun")
     assert "reused_from=" not in call("test", "-E", "all()"), "changed argv reused an old result"
-    call("run", "--", "sh", "-c", "test ! -e /run/secrets && test -f \"$CI_BUDDY_OUT/prepare.txt\"")
+    call("run", "--", "sh", "-c", "test ! -e /run/secrets && test ! -e /work/token && test -f \"$CI_BUDDY_OUT/prepare.txt\"")
     call("run", "--", "python3", "-c", "import socket; socket.create_connection(('192.0.2.1',9))", status=1)
 
     subprocess.run(["git", "switch", "--quiet", "--detach"], cwd=source, check=True)

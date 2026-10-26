@@ -35,6 +35,17 @@ uses the project image with networking and no credentials; runs are offline.
 Network restrictions for fetch, prepare and image builds are tailworker's
 machine boundary, not a property proved by ci-buddy's offline run container.
 
+`auth` enrolls a GitHub token over the same pinned private SSH transport.
+It is stored outside projects at the owner-only root's `github-token`, mode 0600,
+and mounted read-only only in fetch. Owner Git configuration stores a fingerprint,
+not the token. Configured host pools and host.conf workers authorize distribution;
+submitted source cannot add destinations. Fetch supplies the token through Git's
+credential helper and rewrites GitHub SSH URLs to HTTPS. Create a fine-grained
+token with selected repositories and Contents read-only; GitHub enforces these
+permissions, which the tool cannot infer from the token string. Expiry/revocation
+is managed in GitHub; repeat `auth` for replacement. There is no Secret Manager
+or automatic cloud enrollment.
+
 Worker returns are bounded data and are never executed. Result import rejects
 links, special files, unsafe names, control characters and invalid history.
 Workers cannot overwrite coordinator job identity or control metadata. Jobs

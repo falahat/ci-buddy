@@ -1,4 +1,6 @@
 """Private SSH transport. Never impose a deadline on a submitted command."""
+import codecs
+import io
 import ipaddress
 import os
 from pathlib import Path
@@ -6,6 +8,7 @@ import socket
 import stat
 import subprocess
 import sys
+import safe_output
 
 
 OPTIONS = ['-q', '-T', '-x', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
@@ -74,6 +77,41 @@ def command(destination, remote):
     user = ['-l', config['user']] if 'user' in config else []
     return ['ssh', *selected, *OPTIONS, '-p', str(port), *user, '-o', 'HostName=' + address, '-o', 'HostKeyAlias=' + alias,
             *identities, destination, remote]
+
+
+def receive(command, destination, limit, display=False, payload=None):
+    # Bound bytes, not execution time. No transport failure resubmits a job.
+    decoder = codecs.getincrementaldecoder('utf-8')('replace')
+    with subprocess.Popen(command, stdin=subprocess.PIPE if payload is not None else None,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+        if payload is not None:
+            process.stdin.write(payload)
+            process.stdin.close()
+        try:
+            total = 0
+            while block := process.stdout.read1(min(65536, limit - total + 1)):
+                total += len(block)
+                if total > limit:
+                    raise ValueError('worker output exceeds size limit')
+                destination.write(block)
+                if display:
+                    print(safe_output.clean(decoder.decode(block)), end='', flush=True)
+            if display:
+                print(safe_output.clean(decoder.decode(b'', final=True)), end='', flush=True)
+        except BaseException:
+            process.terminate()
+            raise
+        finally:
+            process.stdout.close()
+        return process.wait()
+
+
+def capture(command, limit=4096, payload=None):
+    output = io.BytesIO()
+    status = receive(command, output, limit, payload=payload)
+    if status:
+        raise subprocess.CalledProcessError(status, command)
+    return output.getvalue()
 
 
 if __name__ == '__main__':

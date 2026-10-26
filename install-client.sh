@@ -20,7 +20,7 @@ else revision=$(<"$source_dir/revision"); fi
 [[ $revision =~ ^[0-9a-f]{40}$ ]] || exit 2
 bundle=$HOME/.local/lib/ci-buddy/$revision
 mkdir -p "$bundle" "$HOME/.local/bin"
-for name in ci-buddy safe_output.py ssh.py; do cp "$source_dir/$name" "$bundle/$name"; done
+for name in ci-buddy safe_output.py ssh.py auth.py; do cp "$source_dir/$name" "$bundle/$name"; done
 printf '%s\n' "$revision" >"$bundle/revision"
 printf 'exec bash %q "$@"\n' "$bundle/ci-buddy" >"$HOME/.local/bin/ci-buddy"
 chmod 700 "$HOME/.local/bin/ci-buddy"

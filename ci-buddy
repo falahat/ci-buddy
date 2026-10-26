@@ -1,4 +1,5 @@
 set -euo pipefail
+set +x
 if [[ ${1:-} != --server ]]; then
     [[ -n ${BASH_SOURCE[0]:-} ]] || { echo 'replace the downloaded shim; use the installed local ci-buddy client' >&2; exit 2; }
     client_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -6,6 +7,7 @@ if [[ ${1:-} != --server ]]; then
     else revision=$(git -C "$client_dir" rev-parse --verify HEAD); fi
     [[ $revision =~ ^[0-9a-f]{40}$ ]] || exit 2
     command=${1:?command required}; shift
+    if [[ $command == auth ]]; then exec python3 "$client_dir/auth.py" client "$@"; fi
     case $command in
         run|test|gate) probe=(version) ;;
         status|history|log|cancel|verify|merge) probe=(version --read-only) ;;
@@ -98,6 +100,7 @@ if [[ ${1:-} != --server ]]; then
         run|test|gate) ;;
         *) echo 'expected run, test, gate, verify, merge, status, log or cancel' >&2; exit 2 ;;
     esac
+    python3 "$client_dir/auth.py" client "$selected" "${available[@]}"
     if [[ $command == test ]]; then
         arguments=("$@")
         for ((i=0; i<${#arguments[@]}; i++)); do

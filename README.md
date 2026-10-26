@@ -45,7 +45,25 @@ Exclusive jobs drain the machine, make data writable and allow CPU/NUMA profilin
 
 Unlocked slots rank by commit distance, unknown last, then lowest number. Targets
 stay warm. Host Git metadata stays outside the writable checkout; jobs get a copy.
-Put gitconfig and optional SSH configuration, pinned host keys and key in
+For private GitHub sources, create a fine-grained token for selected repositories
+with Contents read-only and an expiry, then run `ci-buddy auth`. Its hidden prompt
+accepts the token once and distributes it over pinned private SSH to approved
+hosts and their configured workers. No GitHub CLI or Secret Manager is needed.
+The token stays in each host's owner-only root as `github-token` (0600);
+the client keeps only its SHA-256 fingerprint in owner Git configuration.
+New or previously offline hosts obtain that token from an available approved
+host before submission; workers receive it before dispatch. A lost connection
+is reported without retry. Repeat `auth` to replace an expired or revoked token.
+GitHub enforces repository permissions; enrollment cannot prove a token is
+read-only, so select that permission when creating it.
+
+Only the trusted fetch container mounts the token read-only at `/work/token`.
+Git supplies it through a credential helper, never a source URL or argument.
+Token mode fetches GitHub SSH URLs over HTTPS, preserving other providers' settings.
+Prepare and run receive no token. A compromised host or its owning OS account
+can read the stored token; approved hosts therefore remain trusted.
+
+For other Git hosts, put gitconfig and optional SSH configuration, pinned host keys and key in
 `projects/NAME/secrets` (directories 0700, files 0600). Only fetch has network and
 secrets, and executes only Cargo's fetch and metadata commands. Optional prepare
 runs next with network, writable data and no secrets. Run is offline with
@@ -79,7 +97,7 @@ slot_max_gb limits. Busy slots are skipped; maintenance respects exclusive work.
 
 Workers are SSH destinations with roots in host.conf's workers array. Install
 ci-buddy there first, satisfy [the private access requirements](SECURITY.md),
-provision project fetch secrets there, then reinstall the coordinator to include
+enroll the token with `auth` (or provision project fetch secrets), then reinstall the coordinator to include
 configured workers in Pueue's scheduling capacity. Free worker
 slots join the commit-distance choice; the worker queues and locks the job.
 Output streams back and its archived run and SQLite results return to the
@@ -112,17 +130,15 @@ coordinators during a partition can create independent runs.
 
 ## Adding a tailworker machine
 
-Machine creation, accounts, private networking and deploy keys belong to
+Machine creation, accounts and private networking belong to
 tailworker; follow its README and complete the owner's access checks first.
 ci-buddy runs the same installer and container runner on every machine.
 
 On the control host, the owner first reviews a dry run, then creates the
-machine explicitly. Repeat `--deploy-key` for each private dependency:
+machine explicitly:
 
 ```sh
-tailworker up gcp --name "$name" --hours 1 --dry-run \
-  --deploy-key "$dependency" \
-  --deploy-dir ".ci-buddy/projects/$project/secrets" --deploy-base /run/secrets
+tailworker up gcp --name "$name" --hours 1 --dry-run
 ```
 
 After creation, install the reviewed ci-buddy commit used by the coordinator.
@@ -143,4 +159,5 @@ Use the last command's absolute root with the `tw-<name>` alias in the
 coordinator's `workers` array, then reinstall the coordinator once to update
 Pueue capacity. Its owner SSH configuration includes tailworker's aliases and
 pinned host keys. An offline worker fails the availability probe and work runs
-on the coordinator. Ordinary submissions never create or start machines.
+on the coordinator. Its enrolled source token is copied before dispatch.
+Ordinary submissions never create or start machines.

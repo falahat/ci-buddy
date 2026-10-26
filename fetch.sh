@@ -23,6 +23,28 @@ env.update(HOME='/tmp', CARGO_HOME='/work/cargo', RUSTUP_TOOLCHAIN='1.99.0',
     GIT_SSH_COMMAND='ssh -F /run/secrets/ssh/config -T -x -o BatchMode=yes '
         '-o StrictHostKeyChecking=yes -o IdentitiesOnly=yes '
         '-o ForwardAgent=no -o ClearAllForwardings=yes')
+if Path('/work/token').is_file():
+    settings = []
+    github = ('https://github.com/', 'ssh://git@github.com/', 'git@github.com:')
+    if Path(env['GIT_CONFIG_GLOBAL']).is_file():
+        configured = subprocess.check_output(['git', 'config', '--file', env['GIT_CONFIG_GLOBAL'],
+                                             '--includes', '--null', '--list'], env=env)
+        for entry in filter(None, configured.decode().split('\0')):
+            key, _, value = entry.partition('\n')
+            if key.startswith(('include.', 'includeif.')):
+                continue
+            if key.startswith('url.') and key.endswith('.insteadof') and (key[4:-10].lower().startswith(github) or value.lower().startswith(github)):
+                continue
+            settings.append((key, value))
+    settings += [('core.hooksPath', '/tmp/no-hooks'), ('core.fsmonitor', 'false'),
+        ('credential.https://github.com.helper', ''),
+        ('credential.https://github.com.helper',
+         '!f() { if test "$1" = get; then printf "username=x-access-token\\npassword="; cat /work/token; fi; }; f'),
+        ('url.https://github.com/.insteadOf', 'ssh://git@github.com/'),
+        ('url.https://github.com/.insteadOf', 'git@github.com:')]
+    env.update(GIT_CONFIG_GLOBAL='/tmp/no-config', GIT_CONFIG_COUNT=str(len(settings)))
+    for index, (key, value) in enumerate(settings):
+        env['GIT_CONFIG_KEY_' + str(index)], env['GIT_CONFIG_VALUE_' + str(index)] = key, value
 
 
 def checked(*arguments, **options):
