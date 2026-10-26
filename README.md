@@ -55,3 +55,8 @@ force execution. Arbitrary `run --` commands always execute.
 
 Test candidates in an independently installed root while the shared root runs main.
 Check with `python3 check.py` and `python3 e2e.py <destination>:<private-root>`.
+
+An unfiltered `test` compares the candidate with its main merge base (or
+`--since <ref>`), then uses nextest rdeps for changed packages. Shared paths
+select all tests; explicit nextest arguments keep the caller's selection.
+Reports give touched packages and runnable selected/total counts.

@@ -116,7 +116,7 @@ case $kind in
         argv=(bash -c '
             command=$1; affected=$2; shift 2
             listing=${command/nextest run/nextest list}
-            # Run's empty-suite policy is not an option of nextest list.
+            # The empty-suite policy applies only to nextest run.
             for policy in fail pass warn; do listing=${listing/ --no-tests $policy/}; done
             bash -c "$listing --message-format json" >"$CI_BUDDY_OUT/all-tests.json" || exit $?
             [[ -z $affected ]] || set -- "$@" -E "$affected"
