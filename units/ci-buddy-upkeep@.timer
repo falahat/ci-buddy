@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily ci-buddy upkeep (%f)
+[Timer]
+OnCalendar=daily
+Persistent=true
+[Install]
+WantedBy=timers.target

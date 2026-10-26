@@ -28,8 +28,7 @@ try:
                         info = os.fstat(source.fileno())
                         if not stat.S_ISREG(info.st_mode):
                             raise ValueError(f"not a regular file: {path}")
-                        entry = tarfile.TarInfo(path.relative_to(out).as_posix())
-                        entry.size, entry.mtime, entry.mode = info.st_size, int(info.st_mtime), stat.S_IMODE(info.st_mode)
+                        entry = archive.gettarinfo(arcname=path.relative_to(out).as_posix(), fileobj=source)
                         archive.addfile(entry, source)
                     if path.suffix in (".log", ".jsonl") or path.name == "junit.xml":
                         logs.append(path)

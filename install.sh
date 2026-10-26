@@ -14,7 +14,7 @@ else
     echo 'ci-buddy: install from its Git checkout or provide a staging revision file' >&2; exit 2
 fi
 [[ $revision =~ ^[0-9a-f]{40}$ ]] || { echo 'ci-buddy: invalid installed revision' >&2; exit 2; }
-python3 - "$root" <<'PY'
+python3 - "$root" "$source_dir" <<'PY'
 import hashlib, json, os, pathlib, platform, shutil, sys, tomllib, urllib.request
 root = pathlib.Path(sys.argv[1])
 limits = tomllib.loads((root / 'host.conf').read_text())
@@ -53,32 +53,8 @@ if not storage.exists():
     'client:\n  read_local_logs: false\n')
 units = config_home / 'systemd' / 'user'
 units.mkdir(parents=True, exist_ok=True)
-for name, body in {
-    'ci-buddy-pueued@.service': '''[Unit]
-Description=ci-buddy queue (%f)
-[Service]
-Type=exec
-ExecStart="%f/bin/pueued" --config "%f/pueue.yml"
-Restart=on-failure
-[Install]
-WantedBy=default.target
-''',
-    'ci-buddy-upkeep@.service': '''[Unit]
-Description=ci-buddy upkeep (%f)
-[Service]
-Type=oneshot
-ExecStart=bash "%f/bin/upkeep.sh"
-''',
-    'ci-buddy-upkeep@.timer': '''[Unit]
-Description=Daily ci-buddy upkeep (%f)
-[Timer]
-OnCalendar=daily
-Persistent=true
-[Install]
-WantedBy=timers.target
-''',
-}.items():
-    (units / name).write_text(body)
+for template in pathlib.Path(sys.argv[2], 'units').iterdir():
+    shutil.copyfile(template, units / template.name)
 link = pathlib.Path.home() / '.ci-buddy'
 if not link.exists() and not link.is_symlink():
     link.symlink_to(root, target_is_directory=True)

@@ -1,0 +1,5 @@
+[Unit]
+Description=ci-buddy upkeep (%f)
+[Service]
+Type=oneshot
+ExecStart=bash "%f/bin/upkeep.sh"
