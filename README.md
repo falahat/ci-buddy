@@ -26,15 +26,6 @@ incompatible hosts before submission, then its coordinator picks an available
 warm worker. Use the same reviewed revision everywhere and update explicitly.
 A submission never downloads executable client code from a server.
 
-Owner setup uses `worker profile`, then `worker create project/zone/instance
---profile <directory>` to create and enroll one private VM. `worker pair` enrolls
-an existing freshly bootstrapped VM. The profile preserves the owner's existing
-tailnet policy and checks CI access without replacing unrelated grants. One-use
-ephemeral worker keys are consumed through protected stdin/files. Provider and
-repository administration credentials stay on the owner machine. See
-[worker setup](WORKERS.md). Ordinary test submissions use existing capacity;
-the explicit owner creation command is the billable operation.
-
 Invoke `bash "$HOME/.local/bin/ci-buddy"` (or add that directory to PATH):
 `run [--exclusive] -- <command>`, `test [arguments]`, `gate`, `verify <commit>`,
 `merge`, `status`, `log <run>` or `cancel <run>`. Tracked edits use Git stash objects;
@@ -94,7 +85,7 @@ slots join the commit-distance choice; the worker queues and locks the job.
 Output streams back and its archived run and SQLite results return to the
 coordinator. Cancellation follows the worker. Exclusive work and gates with a
 bench remain on their coordinator so executables and comparison data share a
-host. Jobs have no automatic retry or provisioning authority. Optional sccache.env
+host. There is no automatic retry or cloud provisioning. Optional sccache.env
 is passed to prepare/run containers; never store project fetch credentials there.
 To exercise workers in the end-to-end test, give e2e.py a second coordinator
 endpoint configured to use the first endpoint as its worker.
@@ -118,3 +109,8 @@ restored implicitly by running builds in the normal checkout. Control metadata
 inside the output directory is read-only; use other filenames for artifacts.
 Reuse belongs to the selected coordinator; independent submissions to different
 coordinators during a partition can create independent runs.
+
+The owner may explicitly create a Google worker with `worker create`; see
+[WORKERS.md](WORKERS.md). Every machine uses the same installer and container
+runner. Jobs never provision capacity. Existing hosts keep native queues and
+benchmarks; there is no local VM or provisioning framework.

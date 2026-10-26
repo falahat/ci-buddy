@@ -1,99 +1,70 @@
 # Owner-managed workers
 
-Normal submissions automatically use available approved machines. The owner
-creates paid capacity explicitly:
-
-```sh
-bash "$HOME/.local/bin/ci-buddy" worker create project/zone/instance --profile "$HOME/.config/ci-buddy-worker"
-```
-
-This command creates one VM, waits for its reviewed first boot, installs the
-locally pinned runtime, enrolls its separate identity, checks access and registers
-it last. `worker pair` runs enrollment alone for a ready VM from the same template.
-No job or server command can create a VM. The current provisioning profile is
-Ubuntu 26.04 on Compute Engine; owner commands require Linux/WSL and the Google
-CLI. The job client continues to support Windows.
+All machines run the same `install.sh` and rootless container runner. Existing
+owner-administered hosts keep their queues, caches and native benchmarks.
+There is no local VM supervisor, separate worker OS or migration machinery.
+Approved SSH workers join a coordinator through `host.conf`; normal submissions
+use available slots without creating paid machines.
 
 ## Prepare once
 
-Use an owner-controlled dedicated cloud project/network, no external VM address,
-no attached service account, outbound NAT and owner-only IAP tunnel permission.
-Review the effective cloud firewall rules, including inherited rules. Allow IAP
-management SSH only from its documented proxy range. The approved first boot
-installs root-owned host restrictions; VPC rules do not filter provider metadata
-or traffic inside the VM. Builds and tests always remain rootless.
+Keep the existing tailnet. Give `tag:ci-worker` only to separate worker devices,
+with one TCP-22 grant from approved laptop/coordinator identities to that tag.
+Workers get no grants back to submitters, other workers or the LAN. In the
+console check that no catch-all grant, sharing, subnet or exit-route approval
+bypasses this boundary. Preserve other applications and existing device identities.
+No policy export, Tailscale administrator token or automated policy comparison
+is required. Keep owner accounts protected by MFA and device approval.
 
-Keep the existing tailnet. Export its full approved policy as native JSON and
-preserve unrelated applications' grants, groups, SSH rules and tests. Existing laptop/coordinator device identities remain unchanged. CI workers use
-a separate `tag:ci-worker`, owned only by your literal owner login. Merge the
-fragment from `worker.policy.expected_policy(owner, peer_addresses)` once if
-needed; it permits the approved existing peer addresses to worker SSH. Do not
-replace a production tailnet with this fragment. Native CI tests check those
-existing peer identities and reverse worker denials.
-Owner device approval, account MFA and private SSH keys remain trust roots.
+Use a dedicated private cloud project/subnet with outbound NAT, no external VM
+address or service account, and owner-only provisioning/serial-console IAM.
+Review its ingress/egress rules once; a tailnet rule does not govern ordinary
+VPC or LAN traffic. Budget alerts are not a hard spending cap. Ordinary jobs
+cannot create, start or replace cloud instances.
 
-Create one dedicated coordinator transport key outside every checkout, in its
-root's `secrets/worker-transport`; retain the private half there and use its public
-half below. The worker receives public owner/coordinator keys only. Existing
-application worker identities, credentials and state are never copied.
+## Create a Google worker
 
-`worker profile` exports native instance-template, cloud-firewall and full tailnet
-JSON and creates the owner's local SSH key. Source image IDs and disk sizing are
-explicit. Obtain the immutable image self-link/ID and effective firewall JSON
-through the authenticated provider API and approve them once. For example:
+Run the owner command from Linux/WSL with the normal authenticated Google CLI.
+Obtain a single-use, ephemeral, pre-tagged `tag:ci-worker` join key in the
+Tailscale console. Save it without echo in an owned mode-0600 file inside an
+owner-only `secrets` directory outside Git. Prepare the ordinary leaf host.conf
+with explicit jobs, slots, memory, cpus, disk floors and `workers = []`.
 
 ```sh
-bash "$HOME/.local/bin/ci-buddy" worker profile \
-  --output "$HOME/.config/ci-buddy-worker" --owner "$OWNER_LOGIN" --tailnet "$TAILNET" \
-  --account "$WORKER_ACCOUNT" --root "$WORKER_ROOT" --host-conf host.conf \
-  --image "$IMAGE_SELF_LINK" --image-id "$IMAGE_ID" --machine-type "$MACHINE_TYPE" \
-  --disk-size-gb "$DISK_GB" --subnetwork "$SUBNETWORK_SELF_LINK" --firewalls firewalls.json \
-  --policy-file tailnet-policy.json --owner-addresses "$OWNER_PRIVATE_ADDRESSES" \
-  --coordinator-addresses "$COORDINATOR_PRIVATE_ADDRESSES" --dns-addresses "$DNS_ADDRESSES" \
-  --coordinator "$COORDINATOR_ENDPOINT" --coordinator-key-file coordinator.pub --credentials
+bash "$HOME/.local/bin/ci-buddy" worker create PROJECT/ZONE/NAME \
+  --machine-type "$MACHINE_TYPE" --subnet "$PRIVATE_SUBNET" \
+  --disk-size-gb "$DISK_GB" --root "$WORKER_ROOT" \
+  --host-conf worker.conf --auth-key-file "$SECRETS/join-key" \
+  --pubkey-file coordinator.pub
 ```
 
-Profiles containing secrets must live outside Git repositories. Credentials are
-prompted without echo and stored in owned mode-0600 files. The optional GitHub
-token stays local; use a credential scoped to the repositories being enrolled.
-The Tailscale credential must be an API access key/token, not a join key or OAuth
-client secret; restrict its permissions to the required CI key/device operations
-and policy reads wherever the provider supports those scopes. Google credentials
-remain in the owner's normal Google CLI store. No private key or token enters
-startup metadata, image layers, argv or job logs.
+Creation makes one explicit billable instance-creation call. Its public startup
+script installs standard dependencies, a dedicated account and restricted SSH.
+The join secret travels only through Google's authenticated serial connection,
+after a fresh public challenge confirms terminal echo is disabled. It never
+enters startup metadata, argv, environment, images or logs. Both attempted join
+files are consumed even on failure. There is no IAP, guest-attribute API,
+image-ID approval or firewall-export profile.
 
-For an explicitly approved private GitHub dependency, add
-`--dependency owner/repository` to create/pair while in its Rust project checkout
-(or supply `--project name`). A new worker key is generated in that project's
-fetch-only secrets and registered read-only through the owner's local GitHub
-credential. Public projects need no dependency key. Other private providers still
-use their reviewed project secrets provisioning; this GitHub helper does not
-guess another provider's credential policy.
+The same bound channel supplies the initial public SSH pin. Strict private SSH
+installs the locally reviewed runtime archive and runs ordinary `install.sh`.
+Startup/serial metadata is removed afterward. Generated transport keys and pins
+remain in the owner's secrets directory. Additional public-key files authorize
+other approved submitting machines without copying their private keys.
 
-## Admission and failure
+The command prints its endpoint and private SSH-config path. After the network
+checks in [SECURITY.md](SECURITY.md), merge that block into the coordinator's
+owned mode-0600 `<root>/ssh_config`, add `"NAME:WORKER_ROOT"` to `workers` in
+host.conf and reinstall the coordinator to update Pueue's scheduling capacity.
+The worker needs independently provisioned read-only project fetch credentials;
+only the trusted fetch container receives them. Removing its entry and
+reinstalling disables dispatch to it.
 
-Enrollment independently checks native cloud metadata, the immutable image,
-network interfaces, no service account, exact approved startup/firewall recipes,
-and effective cloud firewalls. Google-delivered guest host keys establish the
-first pin only for this freshly approved template, before untrusted jobs. Guest
-attributes are not attestation of a used worker or its firewall. IAP provides the
-initial owner-authenticated path; ordinary job SSH continues to reject proxies.
+A local project claim and existing-instance check prevent this command from
+silently making another CI VM. Ambiguous failures retain the claim and report
+that the VM may still be billing. No VM is retried or automatically deleted;
+inspect it explicitly. This is not a provider-wide spending cap.
 
-The owner API must return the exact approved full tailnet policy before/after
-native access tests. Failed tests in an HTTP-success response are failures.
-Existing grants remain intact. CI tests cover named operations and do not prove
-every possible port; the owner's complete-policy approval and independent
-template denial checks in [SECURITY.md](SECURITY.md) still apply.
-
-Private SSH, wrong-key denial, rootless Podman and network denials must pass
-before registration. Rollback is limited to identities and keys created by that
-enrollment; existing nodes cannot be deleted by a supplied worker address.
-No real cloud deployment or cross-machine isolation is implied by fixture tests.
-
-Creation retains private per-profile/project claims and rejects another CI VM.
-An ambiguous failure is never retried or followed by automatic VM deletion:
-the VM may exist and keep billing, and the owner must inspect it. Enrollment
-revokes its new node/keys on failure where possible and reports unresolved
-cleanup. This is a guard on this command, not a provider-wide spending cap.
-Stopping a VM is an explicit owner action and can leave chargeable disks.
-Ordinary jobs never start paid machines because all configured hosts are down.
+No real cloud worker has been deployed or its cross-machine isolation verified
+by fixture tests. Keep cloud workers disabled until the owner's access checks
+pass. Owner/admin credentials never enter the worker.
