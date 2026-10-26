@@ -5,6 +5,15 @@ for tool in podman git python3 zstd systemctl systemd-escape; do command -v "$to
 source_dir=$(cd "$(dirname "$0")" && pwd -P)
 [[ -f $2/host.conf ]] || { echo 'ci-buddy: write <root>/host.conf with jobs, slots, memory, cpus, min_free_gb, slot_max_gb and workers before installing' >&2; exit 2; }
 root=$(cd "$2" && pwd -P)
+# Reuse keys need the installed revision even when staging omits Git metadata.
+if [[ -e $source_dir/.git ]]; then
+    revision=$(git -C "$source_dir" rev-parse --verify HEAD)
+elif [[ -f $source_dir/revision ]]; then
+    revision=$(<"$source_dir/revision")
+else
+    echo 'ci-buddy: install from its Git checkout or provide a staging revision file' >&2; exit 2
+fi
+[[ $revision =~ ^[0-9a-f]{40}$ ]] || { echo 'ci-buddy: invalid installed revision' >&2; exit 2; }
 python3 - "$root" <<'PY'
 import hashlib, json, os, pathlib, platform, shutil, sys, tomllib, urllib.request
 root = pathlib.Path(sys.argv[1])
@@ -77,11 +86,13 @@ PY
 [[ $(podman info --format '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}') == 'true v2' ]] || {
     echo 'ci-buddy requires rootless Podman with cgroup v2' >&2; exit 2;
 }
-for file in ci-buddy data.py job.sh upkeep.sh; do
+for file in ci-buddy data.py history.py archive.py job.sh upkeep.sh; do
     cp "$source_dir/$file" "$root/bin/$file.new"
     chmod +x "$root/bin/$file.new"
     mv "$root/bin/$file.new" "$root/bin/$file"
 done
+printf '%s\n' "$revision" >"$root/bin/revision.new"
+mv "$root/bin/revision.new" "$root/bin/revision"
 touch "$root/machine.lock" "$root/turnstile"
 systemctl --user daemon-reload
 # A path instance gives every root its own queue and upkeep without changing peers.
