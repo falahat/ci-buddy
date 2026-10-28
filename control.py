@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 
@@ -19,6 +20,12 @@ import history
 def client(root):
     from dispatch_client import DispatchClient
     return DispatchClient('unix:' + str(root / 'dispatch/app.sock'), retry_requests=False)
+
+
+def reader(command, **options):
+    process = subprocess.Popen(command, **options)
+    threading.Thread(target=process.wait, daemon=True).start()
+    return process
 
 
 def invocation(root, address=None, params=None):
@@ -104,8 +111,8 @@ def phase(root, project, run):
     if not job['bench_required']:
         return wait_run(root, project, run)
     with tempfile.TemporaryFile() as reply:
-        waiter = subprocess.Popen([sys.executable, __file__, str(root), project, 'wait-job',
-                                   data.read_file(out / 'task').strip()], stdout=reply)
+        waiter = reader([sys.executable, __file__, str(root), project, 'wait-job',
+                         data.read_file(out / 'task').strip()], stdout=reply)
         tail = subprocess.Popen(['tail', '-n', '+1', '-F', '--pid=' + str(waiter.pid), str(out / 'exit')],
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         try:
@@ -138,7 +145,7 @@ def watch(root, project, run):
         subprocess.run([sys.executable, str(root / 'bin/archive.py'), str(out), 'log'], check=True)
         return status
     with log:
-        process = subprocess.Popen([sys.executable, __file__, str(root), project, 'phase', run])
+        process = reader([sys.executable, __file__, str(root), project, 'phase', run])
         subprocess.run(['tail', '-n', '+1', '-f', '--pid=' + str(process.pid)], stdin=log, check=True)
         return process.wait()
 
