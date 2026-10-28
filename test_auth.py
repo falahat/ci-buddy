@@ -45,8 +45,7 @@ class Credentials(unittest.TestCase):
         self.assertNotIn(self.token.decode(), output.getvalue())
         self.assertNotIn(self.token, (self.root / 'owner.gitconfig').read_bytes())
         new = self.host('new')
-        with self.assertRaises(ValueError):
-            auth.client(['local:' + str(new), endpoint])
+        self.assertRaises(ValueError, auth.client, ['local:' + str(new), endpoint])
         subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', 'local:' + str(new)], check=True)
         auth.client(['local:' + str(new), endpoint])
         self.assertEqual(auth.read(new), self.token)
@@ -58,20 +57,16 @@ class Credentials(unittest.TestCase):
 
     def test_private_files_and_invalid_input(self):
         root = self.host('coordinator')
-        with self.assertRaises(ValueError):
-            auth.store(root, self.token + b'\npassword=unexpected')
+        self.assertRaises(ValueError, auth.store, root, self.token + b'\npassword=unexpected')
         self.assertFalse((root / 'github-token').exists())
         auth.store(root, self.token)
         (root / 'github-token').chmod(0o644)
-        with self.assertRaises(ValueError):
-            auth.read(root)
+        self.assertRaises(ValueError, auth.read, root)
         (root / 'github-token').unlink()
         (root / 'github-token').symlink_to(self.root / 'owner.gitconfig')
-        with self.assertRaises(OSError):
-            auth.read(root)
+        self.assertRaises(OSError, auth.read, root)
         for endpoint in ('public:/work/path\nbad', 'local:relative', '-option:/tmp'):
-            with self.assertRaises(ValueError):
-                auth.rpc(endpoint, 'store', self.token)
+            self.assertRaises(ValueError, auth.rpc, endpoint, 'store', self.token)
         owned = self.host('.ci-buddy')
         submitted = self.root / 'submitted'
         malicious = submitted / '.ci-buddy' / 'bin'
@@ -86,37 +81,29 @@ class Credentials(unittest.TestCase):
     def test_real_prompt_disables_echo(self):
         root = self.host('coordinator')
         subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', 'local:' + str(root)], check=True)
-        master, terminal = os.openpty()
-        process = subprocess.Popen(['bash', str(Path(__file__).with_name('ci-buddy')), 'auth'],
-                                   stdin=terminal, stdout=terminal, stderr=terminal, start_new_session=True)
-        transcript = b''
-        try:
-            while not transcript.endswith(b'read-only): '):
-                transcript += os.read(master, 4096)
-            self.assertFalse(termios.tcgetattr(terminal)[3] & termios.ECHO)
-            os.write(master, self.token + b'\n')
-            os.close(terminal)
-            terminal = None
-            while True:
+        master_fd, terminal_fd = os.openpty()
+        with os.fdopen(master_fd, 'rb', buffering=0) as master, os.fdopen(terminal_fd, 'wb', buffering=0) as terminal:
+            process = subprocess.Popen(['bash', str(Path(__file__).with_name('ci-buddy')), 'auth'],
+                                       stdin=terminal, stdout=terminal, stderr=terminal, start_new_session=True)
+            transcript = b''
+            try:
+                while not transcript.endswith(b'read-only): '):
+                    transcript += master.read(4096)
+                self.assertFalse(termios.tcgetattr(terminal)[3] & termios.ECHO)
+                terminal.write(self.token + b'\n')
+                terminal.close()
                 try:
-                    block = os.read(master, 4096)
+                    while block := master.read(4096):
+                        transcript += block
                 except OSError as error:
-                    if error.errno != errno.EIO:
-                        raise
-                    break
-                if not block:
-                    break
-                transcript += block
-            self.assertEqual(process.wait(), 0)
-            self.assertNotIn(self.token, transcript)
-            self.assertEqual(auth.read(root), self.token)
-        finally:
-            if terminal is not None:
-                os.close(terminal)
-            os.close(master)
-            if process.poll() is None:
-                process.terminate()
-            process.wait()
+                    self.assertEqual(error.errno, errno.EIO)
+                self.assertEqual(process.wait(), 0)
+                self.assertNotIn(self.token, transcript)
+                self.assertEqual(auth.read(root), self.token)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait()
 
     def test_native_git_helper_preserves_other_providers(self):
         root = self.host('fetch')
