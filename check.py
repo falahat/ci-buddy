@@ -4,7 +4,7 @@ import subprocess
 
 root = Path(__file__).resolve().parent
 names = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root).decode().split("\0")
-allowed = ("/work", "/run/secrets", "/sys/fs/cgroup", "/tmp", "/dev/stdin")
+allowed = ("/work", "/run/secrets", "/sys/fs/cgroup", "/tmp", "/proc/self/fd/0")
 absolute = re.compile(r"(?<![A-Za-z0-9_.$})/~])/(?:[A-Za-z0-9_.-]+/?)+")
 drive = re.compile(r"\b[A-Za-z]:[" + re.escape(chr(92)) + "/]")
 unc = re.compile(re.escape(chr(92) * 2) + r"[A-Za-z0-9_.-]+" + re.escape(chr(92)))
