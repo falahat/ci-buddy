@@ -18,13 +18,13 @@ def identity(root):
     return [boot.read_text().strip(), info.st_dev, info.st_ino]
 
 
-def write_conf(root, value):
-    with tempfile.NamedTemporaryFile(dir=root, delete=False) as output:
+def write_file(path, value):
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
         temporary = Path(output.name)
         try:
             output.write(value)
             output.flush()
-            temporary.replace(root / 'host.conf')
+            temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -32,7 +32,7 @@ def write_conf(root, value):
 def register(root, request, revision, old):
     assert identity(root) != request['identity'], 'a runner cannot dispatch to itself'
     host, peer = request['endpoint'].split(':', 1)
-    probe = ['bash', str(Path(peer) / 'bin/ci-buddy'), '--server', 'enrollment', 'version']
+    probe = ['bash', str(Path(peer) / 'bin/ci-buddy'), '--server', 'enrollment', 'version', '--worker']
     if host == 'local':
         assert identity(root)[0] == request['identity'][0], 'local worker belongs to another control host'
         target = Path(peer).stat()
@@ -45,8 +45,6 @@ def register(root, request, revision, old):
     if request['endpoint'] in limits['workers']:
         return False
     limits['workers'].append(request['endpoint'])
-    conf = '\n'.join(key + ' = ' + json.dumps(value) for key, value in limits.items()) + '\n'
-    write_conf(root, conf.encode())
     return limits
 
 
@@ -59,7 +57,7 @@ def install(root, revision, archive_data):
             archive.extractall(stage, filter='data')
         (stage / 'revision').write_text(revision + '\n')
         with (root / 'enrollment.log').open('wb') as log:
-            subprocess.run(['bash', str(stage / 'install.sh'), '--root', str(root)],
+            subprocess.run(['bash', str(stage / 'install.sh'), '--root', str(root), '--worker'],
                            check=True, stdout=log, stderr=subprocess.STDOUT)
 
 
@@ -76,26 +74,29 @@ def apply(root, request, archive_data):
     else:
         assert request['mode'] == 'install', 'runner is not installed'
         assert not any(item.name != 'enrollment.lock' for item in root.iterdir()), 'runner root is not empty'
-        write_conf(root, request['conf'].encode())
-    capacity = [str(root / 'bin/pueue'), '--config', str(root / 'pueue.yml'), 'parallel', '--group', 'jobs']
-    def parallel(limits):
-        subprocess.run(capacity + [str(limits['jobs'] * (1 + len(limits['workers'])))],
-                       check=True, stdout=subprocess.DEVNULL)
+        write_file(conf, request['conf'].encode())
+    capacity = root / 'capacity'
+    old_capacity = capacity.read_bytes() if request['mode'] == 'register' else None
     try:
         if request['mode'] == 'register':
             limits = register(root, request, revision, old)
             if not limits:
                 return
-            parallel(limits)
+            content = '\n'.join(key + ' = ' + json.dumps(value) for key, value in limits.items()) + '\n'
+            write_file(conf, content.encode())
+            write_file(capacity, (str(limits['jobs'] * (1 + len(limits['workers']))) + '\n').encode())
+            instance = subprocess.check_output(['systemd-escape', '--path', str(root)], text=True).strip()
+            subprocess.run(['systemctl', '--user', 'reload', 'ci-buddy-dispatch@' + instance + '.service'], check=True)
         elif old is None:
             install(root, revision, archive_data)
         result = subprocess.check_output(['bash', str(root / 'bin/ci-buddy'),
-                                          '--server', 'enrollment', 'version'], text=True)
+                                          '--server', 'enrollment', 'version',
+                                          *(['--worker'] if request['mode'] == 'install' else [])], text=True)
         assert result.strip() == revision, 'installed runner revision or readiness differs'
     except BaseException:
         if request['mode'] == 'register':
-            write_conf(root, old)
-            parallel(tomllib.loads(old.decode()))
+            write_file(conf, old)
+            write_file(capacity, old_capacity)
         raise
 
 

@@ -79,10 +79,9 @@ def enroll(args):
     try:
         auth.client([endpoint, *configured])
         invoke(coordinator, dict(mode='register', revision=revision, endpoint=endpoint, identity=identity), b'')
-    except BaseException:
+    finally:
         if added:
             subprocess.run(['git', 'config', '--global', '--fixed-value', '--unset-all', 'ci-buddy.host', endpoint], check=True)
-        raise
     print('enrolled=' + args.name + ' endpoint=' + endpoint + ' coordinator=' + coordinator)
 
 

@@ -17,6 +17,7 @@ for name in filter(None, names):
         code_lines += len(lines)
     for number, line in enumerate(lines, 1):
         line = re.sub(r"\b[a-z][a-z0-9+.-]*://\S+", "", line)
+        line = re.sub(r"</[A-Za-z_][A-Za-z0-9_:-]*>", "", line)
         # These single-character Bash substitutions cannot name a root.
         line = re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*//[-_]/[-_]\}", "", line)
         assert not drive.search(line) and not unc.search(line), (name, number, "absolute Windows path")

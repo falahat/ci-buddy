@@ -175,13 +175,13 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
         for _ in range(count):
             holder = launch("run", "--", "true")
             holders.append((holder, announced(holder)))
-        run_probe("tasks = [(project / 'runs' / run / 'task').read_text().strip() for run in " +
-                  repr([run for _, run in holders]) + "]\n" +
-                  "subprocess.run([str(root/'bin/pueue'),'--config',str(root/'pueue.yml'),"
-                  "'wait','--status','running']+tasks,check=True)")
         queued = launch("run", "--", "true")
         queued_run = announced(queued)
-        run_probe("""assert not (out / 'slot').read_text().strip(), 'job fetched before cancellation'
+        run_probe("""sys.path.insert(0,str(root/'bin'))
+import control
+with control.client(root) as queue:
+    assert queue.job((out/'task').read_text().strip())['state'] == 'QUEUED'
+assert not (out / 'slot').read_text().strip(), 'job fetched before cancellation'
 assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify','--quiet',
                        'refs/ci-buddy/'+sys.argv[2]]).returncode == 0""", queued_run)
         call("cancel", queued_run)
@@ -226,7 +226,7 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
         readonly = """import errno,os,sys
 from pathlib import Path
 print('worker-exit-three-once',flush=True)
-for name in ('job.json','task','slot','exit','bench-task','bench-exit','worker-exit'):
+for name in ('job.json','task','slot','exit','bench-task','bench-exit'):
     try:
         descriptor = os.open(Path(os.environ['CI_BUDDY_OUT']) / name, os.O_WRONLY)
     except OSError as error:

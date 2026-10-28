@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -22,6 +23,9 @@ class Enrollment(unittest.TestCase):
         tools.mkdir()
         record = dict(name='existing', host='local', kind='owned', online=True)
         (tools / 'tailworker').write_text('import json\nprint(' + repr(json.dumps(record)) + ')\n')
+        service = tools / 'systemctl'
+        service.write_text('#!' + shutil.which('sh') + '\nfind "' + str(self.root) + '" -name fail-reload | grep -q . && exit 7\nexit 0\n')
+        service.chmod(0o700)
         self.enterContext(patch.dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'],
                                      GIT_CONFIG_GLOBAL=str(self.root / 'owner.gitconfig'), GIT_CONFIG_NOSYSTEM='1'))
         self.revision = 'a' * 40
@@ -30,11 +34,8 @@ test ! -e "$2/fail-install" || exit 7
 mkdir -p "$2/bin"
 printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$2/bin/revision"
 printf 'cat "$(dirname "$0")/revision"\n' >"$2/bin/ci-buddy"
-printf '#!%s\n' "$(command -v sh)" >"$2/bin/pueue"
-cat >>"$2/bin/pueue" <<'SH'
-test ! -e "$(dirname "$0")/../fail-install" || test "$6" = 1
-SH
-chmod 700 "$2/bin/pueue"
+printf '1\n' >"$2/capacity"
+test "$3" = --worker
 printf 'installed\n' >>"$2/installs"
 '''
         archive = io.BytesIO()
@@ -82,15 +83,17 @@ workers = []
         self.assertEqual((self.leaf / 'installs').read_text(), 'installed\n')
         self.auth.side_effect = None
         enroll.enroll(self.args)
-        self.assertEqual(self.routes().count(endpoint), 1)
+        self.assertNotIn(endpoint, self.routes())
+        self.assertEqual((self.root / 'coordinator/capacity').read_text(), '2\n')
         for root in (self.leaf, self.root / 'coordinator'):
             self.assertEqual((root / 'installs').read_text(), 'installed\n')
             self.assertFalse(list(root.glob('enroll-*')))
 
     def test_registration_failure_restores_only_new_route_and_configuration(self):
-        (self.root / 'coordinator/fail-install').touch()
+        (self.root / 'coordinator/fail-reload').touch()
         self.reject(subprocess.CalledProcessError, [self.coordinator])
         self.assertTrue((self.leaf / 'bin/revision').exists())
+        self.assertEqual((self.root / 'coordinator/capacity').read_text(), '1\n')
         self.assertFalse(list((self.root / 'coordinator').glob('enroll-*')))
 
     def test_existing_route_survives_auth_failure(self):

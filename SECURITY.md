@@ -25,6 +25,11 @@ machine lock; installing refuses conflicting existing locks. Scheduling lanes
 are not reservations: each execution host enforces its own jobs, slots, disk
 floor and container memory cap. Offline endpoints do not block installation.
 Exclusive work and gates with a bench stay on the coordinator.
+dispatch-service listens only on owner-private Unix sockets and uses its native
+job claims, deduplication and cancellation barrier. Only a coordinator runs the
+queue; workers execute directly through pinned SSH. Cancellation waits for the
+owned executor's cleanup. A lost worker connection remains visibly incomplete
+when its stopped state or return data cannot be verified; it is never resubmitted.
 
 Only the trusted installed fetch image receives project secrets. Keep them in
 `projects/NAME/secrets`, directories 0700 and files 0600. The fetch recipe and

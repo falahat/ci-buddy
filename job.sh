@@ -1,12 +1,10 @@
 set -euo pipefail
-root=$1 project=$2 run=$3
+root=$1 project=$2 run=$3 worker=${5:-}
 export PATH="$root/bin:$PATH"
-export PUEUE_CONFIG_PATH="$root/pueue.yml"
 export TMPDIR="$root/containers"
 folder=$root/projects/$project
 out=$folder/runs/$run
 trap 'git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"' EXIT
-field() { python3 "$root/bin/data.py" field "$out/$1"; }
 write_field() { python3 "$root/bin/data.py" write "$out/$1" "$2"; }
 phase() { python3 "$root/bin/data.py" phase "$out" "${prefix//-/_}" "$1"; }
 prefix=""; [[ ${4:-} != bench ]] || prefix=bench-
@@ -14,29 +12,6 @@ values=$(python3 "$root/bin/data.py" host "$root"); eval "$values"
 values=$(python3 "$root/bin/data.py" load "$out" "${4:-}"); eval "$values"
 free=$(df --output=avail -B1 "$root" | tail -1)
 ((free >= min_free_gb * 1000000000)) || { echo "disk below ${min_free_gb} GB floor"; exit 2; }
-if [[ -z $prefix ]]; then
-    # Dispatch before taking local machine locks; the worker takes its own.
-    if python3 "$root/bin/workers.py" dispatch "$root" "$project" "$run"; then
-        write_field exit 0
-        exit 0
-    else
-        dispatched=$?
-        remote_status=$(field worker-exit)
-        if [[ -n $remote_status ]]; then
-            # Completed work takes precedence over the local-routing sentinel.
-            write_field exit "$remote_status"
-            exit "$remote_status"
-        fi
-        if [[ $dispatched != 3 ]]; then
-            write_field exit "$dispatched"
-            python3 "$root/bin/data.py" stamp "$out" exit "$dispatched"
-            python3 "$root/bin/data.py" stamp "$out" ended_at "$EPOCHREALTIME"
-            python3 "$root/bin/data.py" record "$out"
-            exit "$dispatched"
-        fi
-    fi
-fi
-python3 "$root/bin/data.py" write "$out/${prefix}runner.log" ''
 exec 8>&1
 exec > >(tee -a "$out/${prefix}runner.log") 2>&1
 logger=$!
@@ -50,13 +25,19 @@ finish() {
         status=1
         python3 "$root/bin/data.py" stamp "$out" "${prefix//-/_}exit" "$status"
     }
-    python3 "$root/bin/data.py" record "$out"
-    if [[ $status == 0 && $kind == gate && -n ${bench:-} ]]; then
-        python3 "$root/bin/data.py" stamp "$out" bench_queued_at "$EPOCHREALTIME"
-        id=$(pueue add --print-task-id --group exclusive --after "$(field task)" --label "$project/$run/$key/bench" --escape -- bash "$root/bin/job.sh" "$root" "$project" "$run" bench)
-        write_field bench-task "$id"
-        echo "bench_task=$id"
-        archive=no
+    if [[ $worker != worker ]]; then
+        exec 9>"$folder/submit.lock"
+        flock 9
+        python3 "$root/bin/data.py" record "$out"
+        if [[ $status == 0 && $kind == gate && -n ${bench:-} ]]; then
+            python3 "$root/bin/data.py" stamp "$out" bench_queued_at "$EPOCHREALTIME"
+            id=$(<"$out/task")
+            write_field bench-task "$id"
+            python3 "$root/bin/data.py" write "$out/bench-runner.log" ''
+            echo "bench_task=$id"
+            archive=no
+        fi
+        flock -u 9
     fi
     python3 "$root/bin/data.py" read "$out/report.txt" || true
     exec 1>&8 2>&8
@@ -135,7 +116,7 @@ common=(--rm --init --hostname "$(hostname)" --memory="$memory" --memory-swap="$
     -e "CI_BUDDY_COMMIT=$commit" -e "CI_BUDDY_BASE=$base" -e CI_BUDDY_OUT=/work/out -e CI_BUDDY_DATA=/work/data)
 # data.py creates and validates these controls before enqueue; every project
 # container receives read-only file mounts and cannot replace them.
-for control in job.json task slot exit bench-task bench-exit worker-exit; do
+for control in job.json task slot exit bench-task bench-exit; do
     common+=(-v "$out/$control:/work/out/$control:ro")
 done
 project_mounts=(-v "$slot/src:/work/src" -v "$root/sccache:/work/sccache" -w /work/src)

@@ -8,6 +8,13 @@ import subprocess
 import time
 import xml.etree.ElementTree as ET
 
+HISTORY_LIMIT = 16 * 1024 * 1024
+
+
+class JUnit(ET.TreeBuilder):
+    def doctype(self, name, pubid, system):
+        raise ValueError('JUnit must not declare a DTD')
+
 
 def db(folder):
     connection = sqlite3.connect(Path(folder) / "history.sqlite")
@@ -42,12 +49,29 @@ def record(folder, out, read_file):
     out = Path(out)
     job = json.loads(read_file(out / "job.json"))
     ingested = time.time()
-    watermark = job.get("junit_ingested_at", job.get("started_at", job["queued_at"]))
-    results = []
+    watermark = job.get("junit_ingested_at", job["queued_at"])
+    results, total, xml_bytes = {}, 0, 0
+    def add(name, status, ms, excerpt):
+        nonlocal total
+        if (not isinstance(name, str) or not name or len(name.encode()) > 4096 or '\0' in name
+                or status not in ('passed', 'failed', 'skipped')
+                or type(ms) not in (int, float) or not math.isfinite(ms) or ms < 0
+                or excerpt is not None and (not isinstance(excerpt, str) or len(excerpt.encode()) > 4096)
+                or name.startswith('phase/') and Path(name[6:]).name != name[6:]):
+            raise ValueError('invalid test or phase result')
+        size = len(json.dumps([name, status, ms, excerpt]).encode())
+        total += size - (results[name][1] if name in results else 0)
+        results[name] = ((status, ms, excerpt), size)
+        if len(results) > 100000 or total > HISTORY_LIMIT:
+            raise ValueError('test result count or byte limit exceeded')
     for path in out.rglob("junit.xml"):
         if path.stat().st_mtime < watermark:
             continue
-        for suite in ET.fromstring(read_file(path)).iter("testsuite"):
+        text = read_file(path, HISTORY_LIMIT + 1)
+        xml_bytes += len(text.encode())
+        if xml_bytes > HISTORY_LIMIT:
+            raise ValueError('JUnit XML exceeds byte limit')
+        for suite in ET.fromstring(text, parser=ET.XMLParser(target=JUnit())).iter("testsuite"):
             for case in suite.findall("testcase"):
                 failed = [node for node in case if node.tag in ("failure", "error")]
                 status = "failed" if failed else "skipped" if case.find("skipped") is not None else "passed"
@@ -56,9 +80,9 @@ def record(folder, out, read_file):
                     raise ValueError("invalid JUnit duration")
                 text = "\n".join(node.get("message", "") + "\n" + "".join(node.itertext())
                     for node in [*failed, *case.findall("system-err"), *case.findall("system-out")]) if failed else None
-                results.append((case.attrib["classname"] + "::" + case.attrib["name"], status,
+                add(case.attrib["classname"] + "::" + case.attrib["name"], status,
                     round(seconds * 1000),
-                    text.encode()[:4096].decode(errors="ignore") if text is not None else None))
+                    text.encode()[:4096].decode(errors="ignore") if text is not None else None)
     for prefix in ("", "bench_"):
         if prefix and prefix + "ended_at" not in job:
             continue
@@ -66,12 +90,15 @@ def record(folder, out, read_file):
         status = job.get(prefix + "exit")
         label = "bench" if prefix or job["kind"] == "bench" else "correctness"
         if started is not None and ended is not None:
-            results.append(("phase/" + label, "passed" if status == 0 else "failed", (ended - started) * 1000,
-                None if status == 0 else f"{label} exited {status}"))
+            add("phase/" + label, "passed" if status == 0 else "failed", (ended - started) * 1000,
+                None if status == 0 else f"{label} exited {status}")
         if prefix and started is not None:
-            results.append(("phase/bench-wait", "passed", (started - job["bench_queued_at"]) * 1000, None))
+            add("phase/bench-wait", "passed", (started - job["bench_queued_at"]) * 1000, None)
         try:
-            lines = read_file(out / (prefix.replace("_", "-") + "phases.tsv")).splitlines()
+            text = read_file(out / (prefix.replace("_", "-") + "phases.tsv"), HISTORY_LIMIT + 1)
+            if len(text.encode()) > HISTORY_LIMIT:
+                raise ValueError('phase results exceed byte limit')
+            lines = text.splitlines()
         except FileNotFoundError:
             lines = []
         for line in lines:
@@ -86,7 +113,7 @@ def record(folder, out, read_file):
                     excerpt = read_file(out / (name + ".log")).encode()[-4096:].decode(errors="ignore")
                 except FileNotFoundError:
                     excerpt = f"{name} exited {status}"
-            results.append(("phase/" + name, "passed" if int(status) == 0 else "failed", float(seconds) * 1000, excerpt))
+            add("phase/" + name, "passed" if int(status) == 0 else "failed", float(seconds) * 1000, excerpt)
     values = {key: job.get(key) for key in ("kind", "key", "tree", "commit", "branch", "submitter",
         "queued_at", "started_at", "ended_at", "exit", "cpu_s", "peak_bytes", "reused_from")}
     if values["exit"] is None:
@@ -104,7 +131,7 @@ def record(folder, out, read_file):
             pair = [job.get(name), job.get("bench_" + name)]
             values[name] = combine(pair) if None not in pair else None
     values.update(id=int(out.name), argv=json.dumps(job["argv"]))
-    store(folder, values, results)
+    store(folder, values, ((name, *value[0]) for name, value in results.items()))
     return ingested
 
 

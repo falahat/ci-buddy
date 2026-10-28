@@ -1,14 +1,15 @@
 # ci-buddy
 
-A rootless Podman/Pueue build-and-test queue for Rust projects.
+A rootless Podman build-and-test tool for Rust projects, using dispatch-service's queue.
 
-Install with `bash install.sh --root <directory>` on Linux with rootless Podman,
+Install with `bash install.sh --root <directory> --dispatch-dir <reviewed-bundle>` on Linux with rootless Podman,
 cgroup v2, Git, Python 3.11+, zstd and systemd user services. Enable user lingering.
 First write `<root>/host.conf` with jobs, slots, memory, cpus (empty for uncapped),
 min_free_gb, slot_max_gb and workers (an empty array until workers are wanted).
-keep_days defaults to 90. The installer refuses missing configuration, pins Pueue,
-and selects Podman storage only if none is configured. Each root has its own
-systemd queue and upkeep instances. The first links `~/.ci-buddy`; later roots
+keep_days defaults to 90. The reviewed bundle contains dispatch-local and its
+dispatch_client Python package; installation never downloads them. The installer
+refuses missing configuration and selects Podman storage only if none is configured. Each root has its own
+private Unix-socket dispatch queue and systemd upkeep instances. The first links `~/.ci-buddy`; later roots
 leave that link alone. The queue service restarts on failure without retrying jobs.
 
 Copy `example/ci-buddy.toml` to a workspace and set name, host, main, image and test.
@@ -18,7 +19,7 @@ Only listed image files enter the build context.
 
 Set host to an SSH destination, optionally followed by `:<root>` for another root.
 Install the reviewed client with `bash install-client.sh --host <destination>:<root>`.
-Repeat `--host` for each approved coordinator or leaf worker; `local:<root>`
+Repeat `--host` for each approved coordinator; `local:<root>`
 uses a local Linux queue without SSH. Endpoints live in the owner's global
 Git configuration (`ci-buddy.host`), outside submitted source. The project's
 `host` is a preference within that allowlist. The client skips unavailable or
@@ -37,7 +38,7 @@ starts, a disconnect never causes automatic resubmission.
 A detached HEAD records an empty branch. Candidate refs disappear after checkout
 or when a job ends before checkout, including failed submissions and cancellation.
 
-A green gate queues its optional exclusive bench in the same output folder.
+A green gate runs its optional exclusive bench in the same dispatch job and output folder.
 Correctness returns first. `verify` waits for both and prints their report.
 `merge` verifies clean HEAD, rejects a moved main and pushes without forcing.
 Exclusive jobs drain the machine, make data writable and allow CPU/NUMA profiling.
@@ -97,10 +98,10 @@ slot_max_gb limits. Busy slots are skipped; maintenance respects exclusive work.
 
 Workers are SSH destinations with roots in host.conf's workers array. Install
 ci-buddy there first, satisfy [the private access requirements](SECURITY.md),
-enroll the token with `auth` (or provision project fetch secrets), then reinstall the coordinator to include
-configured workers in Pueue's scheduling capacity. Free worker
-slots join the commit-distance choice; the worker queues and locks the job.
-Output streams back and its archived run and SQLite results return to the
+enroll the token with `auth` (or provision project fetch secrets). Install leaf
+runners with `--worker`; only coordinators run dispatch-service. Free worker
+slots join the commit-distance choice; the worker locks and executes directly.
+Output streams back and its bounded archived run returns to the
 coordinator. Cancellation follows the worker. Exclusive work and gates with a
 bench remain on their coordinator so executables and comparison data share a
 host. There is no automatic retry or cloud provisioning. Optional sccache.env
@@ -109,7 +110,7 @@ To exercise workers in the end-to-end test, give e2e.py a second coordinator
 endpoint configured to use the first endpoint as its worker.
 
 Install the same commit on coordinator and workers. The coordinator owns reuse;
-a newly dispatched request forces one fresh execution in the worker queue.
+a newly dispatched request executes once on the chosen worker under the original queue lease.
 
 Job transport SSH permits only private, loopback or tailnet addresses, with independently pinned
 host keys and separate machine keys. Proxies, forwarding and local SSH commands
@@ -158,10 +159,17 @@ the worker alias, approved authentication and host pin; enrollment copies no
 keys. A local leaf must share the coordinator's machine.
 
 New roots must be empty; existing roots must have the same reviewed revision
-and host settings. Coordinator updates change host.conf and native Pueue capacity
+and host settings. Coordinator updates change host.conf and native dispatch capacity
 without reinstalling the runtime or restarting work. Failed registration restores changed
-configuration and removes only a newly added owner route. Existing routes and
+configuration and removes its temporary authentication route. Existing routes and
 credentials remain. Normal jobs can use the free leaf through the existing
 commit-distance picker; exclusive work and gates with a bench retain their
 coordinator locality. Offline workers fall back before acceptance. Ordinary
 submissions never create or start machines.
+
+The dispatch daemon has no TCP listener. Native job keys, claims, waiting and
+cancellation own queue lifecycle; ci-buddy owns source, containers and history.
+Capacity increases use SIGHUP. A failed registration restores configuration and
+the capacity file; any already-added idle consumers remain until an idle restart.
+Per-host admission still enforces physical limits. A gate returns correctness
+early, while verify waits for the entire native job and its CI exit status.

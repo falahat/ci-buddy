@@ -1,9 +1,0 @@
-[Unit]
-Description=ci-buddy queue (%f)
-[Service]
-Type=exec
-UMask=0077
-ExecStart="%f/bin/pueued" --config "%f/pueue.yml"
-Restart=on-failure
-[Install]
-WantedBy=default.target

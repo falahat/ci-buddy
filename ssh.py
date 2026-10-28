@@ -9,6 +9,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import safe_output
 
 
@@ -21,6 +22,8 @@ OPTIONS = ['-q', '-T', '-x', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking
 NETWORKS = tuple(ipaddress.ip_network((address, bits)) for address, bits in (
     ('127.0.0.0', 8), ('10.0.0.0', 8), ('172.16.0.0', 12),
     ('192.168.0.0', 16), ('100.64.0.0', 10), ('::1', 128), ('fc00::', 7)))
+ACTIVE = set()
+STOP_INPUT = False
 
 
 def endpoint(value):
@@ -91,14 +94,37 @@ def command(destination, remote):
             *identities, destination, remote]
 
 
-def receive(command, destination, limit, display=False, payload=None):
+def receive(command, destination, limit, display=False, payload=None, keep_input=False):
     # Bound bytes, not execution time. No transport failure resubmits a job.
     decoder = codecs.getincrementaldecoder('utf-8')('replace')
     with subprocess.Popen(command, stdin=subprocess.PIPE if isinstance(payload, bytes) else payload,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
         if isinstance(payload, bytes):
-            process.stdin.write(payload)
-            process.stdin.close()
+            process.input_lock = threading.Lock()
+            process.input_finished = False
+            process.close_input = STOP_INPUT
+            process.keep_input = keep_input
+        ACTIVE.add(process)
+        if isinstance(payload, bytes):
+            process.close_input = process.close_input or STOP_INPUT
+            def feed():
+                try:
+                    process.stdin.write(payload)
+                    process.stdin.flush()
+                except (OSError, ValueError):
+                    pass
+                with process.input_lock:
+                    process.input_finished = True
+                    if not keep_input or process.close_input:
+                        try:
+                            process.stdin.close()
+                        except OSError:
+                            pass
+            if keep_input:
+                process.input_thread = threading.Thread(target=feed, daemon=True)
+                process.input_thread.start()
+            else:
+                feed()
         try:
             total = 0
             while block := process.stdout.read1(min(65536, limit - total + 1)):
@@ -114,7 +140,10 @@ def receive(command, destination, limit, display=False, payload=None):
             process.terminate()
             raise
         finally:
+            ACTIVE.discard(process)
             process.stdout.close()
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
         return process.wait()
 
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=ci-buddy dispatch queue (%f)
+[Service]
+Type=notify
+UMask=0077
+ExecStart="%f/bin/dispatch-local" --root "%f/dispatch" --config "%f/dispatch.toml" --workers-file "%f/capacity" --lanes jobs --reserve-lane exclusive --no-deadline -- python3 "%f/bin/execute.py"
+ExecReload=kill -HUP $MAINPID
+Restart=on-failure
+KillMode=process
+TimeoutStartSec=infinity
+TimeoutStopSec=infinity
+[Install]
+WantedBy=default.target
