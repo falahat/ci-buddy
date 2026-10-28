@@ -25,7 +25,7 @@ for project in "$root/projects/"*; do
             budget=$((slot_max_gb * 1000000000 - total + target))
             ((budget > 0)) || { echo "slot non-target data exceeds limit: $slot"; exit 1; }
             limits=(); [[ -z $cpus ]] || limits=(--cpus "$cpus")
-            podman run --rm --init --name "ci-buddy-upkeep-${project##*/}-${slot##*/}" \
+            podman run --rm --init \
                 --memory="$memory" --memory-swap="$memory" --pids-limit=8192 --network=none --preserve-fds=2 \
                 "${limits[@]}" -v "$slot/src:/work/src" -w /work/src \
                 -v "$root/cargo/registry:/work/cargo/registry:ro" -v "$root/cargo/git:/work/cargo/git:ro" \
