@@ -144,13 +144,12 @@ def watch(root, project, run):
         status = phase(root, project, run)
         subprocess.run([sys.executable, str(root / 'bin/archive.py'), str(out), 'log'], check=True)
         return status
-    with log:
+    with log, tempfile.TemporaryDirectory(dir=root / 'containers') as temporary:
+        linked = Path(temporary) / 'runner.log'
+        os.link('/proc/self/fd/' + str(log.fileno()), linked, follow_symlinks=True)
         process = reader([sys.executable, __file__, str(root), project, 'phase', run])
         sent = 0
-        follow = ['tail', '-n', '+1', '-f', '--pid=' + str(process.pid)]
-        if '--use-polling' in subprocess.check_output(['tail', '--help'], text=True):
-            follow.append('--use-polling')
-        with subprocess.Popen([*follow, '/proc/self/fd/0'],
+        with subprocess.Popen(['tail', '-n', '+1', '-f', '--pid=' + str(process.pid), str(linked)],
                               stdin=log, stdout=subprocess.PIPE) as tail:
             while block := tail.stdout.read1(65536):
                 sys.stdout.buffer.write(block)
