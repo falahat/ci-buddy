@@ -158,8 +158,8 @@ the worker alias, approved authentication and host pin; enrollment copies no
 keys. A local leaf must share the coordinator's machine.
 
 New roots must be empty; existing roots must have the same reviewed revision
-and host settings. Coordinator updates use the native installer/Pueue capacity
-commands without restarting running work. Failed registration restores changed
+and host settings. Coordinator updates change host.conf and native Pueue capacity
+without reinstalling the runtime or restarting work. Failed registration restores changed
 configuration and removes only a newly added owner route. Existing routes and
 credentials remain. Normal jobs can use the free leaf through the existing
 commit-distance picker; exclusive work and gates with a bench retain their

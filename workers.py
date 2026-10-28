@@ -235,16 +235,7 @@ def main():
         returned.rename(out / 'worker-results')
         compressed.rename(saved)
 
-        database = history.db(folder)
-        with database:
-            columns = ','.join('"' + key + '"' for key in RUN_COLUMNS)
-            database.execute(f'INSERT OR REPLACE INTO runs ({columns}) VALUES ({",".join("?" for _ in RUN_COLUMNS)})',
-                             tuple(row[key] for key in RUN_COLUMNS))
-            for name, test_status, ms, excerpt in results:
-                database.execute('INSERT OR IGNORE INTO tests(name) VALUES (?)', (name,))
-                test = database.execute('SELECT id FROM tests WHERE name=?', (name,)).fetchone()[0]
-                database.execute('INSERT OR REPLACE INTO results VALUES (?,?,?,?,?)', (test, int(identifier), test_status, ms, excerpt))
-        database.close()
+        history.store(folder, row, results)
         job.update({key: row[key] for key in ('started_at', 'ended_at', 'exit', 'cpu_s', 'peak_bytes')})
         (out / 'job.json').write_text(json.dumps(job))
         (out / 'slot').write_text('' if row['slot'] is None else str(row['slot']))

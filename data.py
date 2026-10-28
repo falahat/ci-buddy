@@ -253,27 +253,17 @@ elif command == "image":
     context.mkdir()
     digest = hashlib.sha256()
     for item in config["image"]:
-        path = source / item
         if Path(item).is_absolute() or ".." in Path(item).parts:
             raise ValueError(f"invalid image file: {item}")
-        cursor = source
-        for part in Path(item).parts:
-            cursor /= part
-            if cursor.is_symlink():
-                raise ValueError(f"image path contains a symlink: {item}")
-        if not path.is_file():
-            raise ValueError(f"image file is missing: {item}")
-        recorded = git(repository, "--literal-pathspecs", "ls-tree", "--format=%(objectmode)", "HEAD", "--", item)
-        if recorded not in ("100644", "100755"):
+        recorded = git(repository, "--literal-pathspecs", "ls-tree", "--format=%(objectmode) %(objectname)", "HEAD", "--", item)
+        mode, blob = recorded.split()
+        if mode not in ("100644", "100755"):
             raise ValueError(f"image file is not a tracked regular file: {item}")
-        mode = int(recorded, 8) & 0o777
-        digest.update(item.encode() + b"\0")
-        digest.update(mode.to_bytes(4, "big"))
-        digest.update(hashlib.sha256(path.read_bytes()).digest())
+        digest.update(item.encode() + b"\0" + recorded.encode())
         target = context / item
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-        target.chmod(mode)
+        target.write_bytes(subprocess.check_output(["git", "-C", str(repository), "cat-file", "blob", blob]))
+        target.chmod(int(mode, 8) & 0o777)
     emit(dict(image=f"ci-buddy-{project}:{digest.hexdigest()[:16]}", containerfile=config["image"][0],
               prepare=config.get("prepare", ""), wrapper=config.get("wrapper", ""),
               test=config["test"], gate=config.get("gate", ""), bench=config.get("bench", "")))

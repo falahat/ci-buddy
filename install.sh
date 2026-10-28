@@ -16,7 +16,7 @@ else
 fi
 [[ $revision =~ ^[0-9a-f]{40}$ ]] || { echo 'ci-buddy: invalid installed revision' >&2; exit 2; }
 python3 - "$root" "$source_dir" <<'PY'
-import hashlib, json, os, pathlib, platform, shutil, subprocess, sys, tomllib, urllib.request
+import hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, tomllib, urllib.request
 root = pathlib.Path(sys.argv[1])
 if root.stat().st_uid != os.getuid():
     raise SystemExit('ci-buddy: root must belong to the installing user')
@@ -42,6 +42,11 @@ for directory in ('bin', 'containers', 'cargo', 'sccache', 'projects', 'pueue'):
     path = root / directory
     path.mkdir(exist_ok=True)
     path.chmod(0o700)
+# Only the trusted fetch image writes these shared Cargo-native locks.
+for name in ('.package-cache', '.package-cache-mutate'):
+    with os.fdopen(os.open(root / 'cargo' / name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600), 'a') as lock:
+        if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+            raise SystemExit('ci-buddy: Cargo lock must be a regular file')
 checksums = {
     'x86_64': ('c1b10d7e4e62211075ddd0e1dc3e8cbfc5a43d662cb3be7402a28504e23fcb51', '5afeff6adbafb909e8d54e2caff158e6966c2adffa2c09e60fd631cc51b60390'),
     'aarch64': ('759bf5100a51024997111c6913aaf3330a0cdfd893ff552dcf429ae9b5e01e09', '332c5ef74270b64aeaf04894c8c04826f3422eb7d50dbd1a8e0706d74a42f653'),

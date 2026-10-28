@@ -47,7 +47,7 @@ def register(root, request, revision, old):
     limits['workers'].append(request['endpoint'])
     conf = '\n'.join(key + ' = ' + json.dumps(value) for key, value in limits.items()) + '\n'
     write_conf(root, conf.encode())
-    return True
+    return limits
 
 
 def install(root, revision, archive_data):
@@ -77,10 +77,17 @@ def apply(root, request, archive_data):
         assert request['mode'] == 'install', 'runner is not installed'
         assert not any(item.name != 'enrollment.lock' for item in root.iterdir()), 'runner root is not empty'
         write_conf(root, request['conf'].encode())
-    if request['mode'] == 'register' and not register(root, request, revision, old):
-        return
+    capacity = [str(root / 'bin/pueue'), '--config', str(root / 'pueue.yml'), 'parallel', '--group', 'jobs']
+    def parallel(limits):
+        subprocess.run(capacity + [str(limits['jobs'] * (1 + len(limits['workers'])))],
+                       check=True, stdout=subprocess.DEVNULL)
     try:
-        if old is None or request['mode'] == 'register':
+        if request['mode'] == 'register':
+            limits = register(root, request, revision, old)
+            if not limits:
+                return
+            parallel(limits)
+        elif old is None:
             install(root, revision, archive_data)
         result = subprocess.check_output(['bash', str(root / 'bin/ci-buddy'),
                                           '--server', 'enrollment', 'version'], text=True)
@@ -88,11 +95,7 @@ def apply(root, request, archive_data):
     except BaseException:
         if request['mode'] == 'register':
             write_conf(root, old)
-            previous = tomllib.loads(old.decode())
-            parallel = previous['jobs'] * (1 + len(previous['workers']))
-            subprocess.run([str(root / 'bin/pueue'), '--config', str(root / 'pueue.yml'),
-                            'parallel', '--group', 'jobs', str(parallel)],
-                           check=True, stdout=subprocess.DEVNULL)
+            parallel(tomllib.loads(old.decode()))
         raise
 
 

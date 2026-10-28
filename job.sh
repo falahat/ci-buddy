@@ -112,7 +112,7 @@ values=$(python3 "$root/bin/data.py" image "$slot/src" "$slot/context" "$project
 exec 7>"$root/containers/$image.lock"
 flock 7
 if ! podman image exists "$image"; then
-    podman build --memory="$memory" --memory-swap="$memory" -t "$image" -f "$slot/context/$containerfile" "$slot/context"
+    podman build --retry=0 --memory="$memory" --memory-swap="$memory" -t "$image" -f "$slot/context/$containerfile" "$slot/context"
 fi
 flock -u 7
 fetch_hash=$(cat "$root/bin/fetch.Containerfile" "$root/bin/fetch.sh" | sha256sum)
@@ -124,7 +124,7 @@ if ! podman image exists "$fetch_image"; then
     mkdir -p "$fetch_context"
     # The credential-bearing image contains installed code, never project files.
     cp "$root/bin/fetch.Containerfile" "$root/bin/fetch.sh" "$fetch_context/"
-    podman build --memory="$memory" --memory-swap="$memory" -t "$fetch_image" \
+    podman build --retry=0 --memory="$memory" --memory-swap="$memory" -t "$fetch_image" \
         -f "$fetch_context/fetch.Containerfile" "$fetch_context"
 fi
 flock -u 7
@@ -133,16 +133,8 @@ common=(--rm --init --hostname "$(hostname)" --memory="$memory" --memory-swap="$
     -e CARGO_HOME=/work/cargo -e RUSTC_WRAPPER=sccache -e SCCACHE_DIR=/work/sccache
     -e "CI_BUDDY_PROJECT=$project" -e "CI_BUDDY_RUN=$run" -e "CI_BUDDY_KIND=$kind"
     -e "CI_BUDDY_COMMIT=$commit" -e "CI_BUDDY_BASE=$base" -e CI_BUDDY_OUT=/work/out -e CI_BUDDY_DATA=/work/data)
-python3 - "$out" <<'PY'
-import os, stat, sys
-for name in ('task', 'slot', 'exit', 'bench-task', 'bench-exit', 'worker-exit'):
-    path = os.path.join(sys.argv[1], name)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-    regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
-    os.close(descriptor)
-    if not regular:
-        raise ValueError('control file must be regular')
-PY
+# data.py creates and validates these controls before enqueue; every project
+# container receives read-only file mounts and cannot replace them.
 for control in job.json task slot exit bench-task bench-exit worker-exit; do
     common+=(-v "$out/$control:/work/out/$control:ro")
 done
@@ -150,15 +142,6 @@ project_mounts=(-v "$slot/src:/work/src" -v "$root/sccache:/work/sccache" -w /wo
 # Podman inherits descriptors 3 (slot) and 4 (machine). Its processes keep the
 # flock descriptions alive even if the host runner dies; every step inherits both.
 phase fetch
-python3 - "$root/cargo" <<'PY'
-import os, stat, sys
-for name in ('.package-cache', '.package-cache-mutate'):
-    descriptor = os.open(os.path.join(sys.argv[1], name), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-    regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
-    os.close(descriptor)
-    if not regular:
-        raise ValueError('Cargo cache lock must be a regular file')
-PY
 token=()
 if [[ -e $root/github-token || -L $root/github-token ]]; then
     python3 "$root/bin/auth.py" check

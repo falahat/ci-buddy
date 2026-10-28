@@ -51,17 +51,23 @@ def rpc(endpoint, mode, token=b''):
     return ssh.capture(argv, 512, payload=token)
 
 
-def install(root, token):
-    store(root, token)
+def distribute(token, endpoints, mode, announce=False):
     failed = False
-    for endpoint in tomllib.loads((root / 'host.conf').read_text())['workers']:
+    for endpoint in dict.fromkeys(endpoints):
         try:
-            rpc(endpoint, 'store', token)
+            rpc(endpoint, mode, token)
+            if announce:
+                print('credentials installed: ' + endpoint)
         except (OSError, ValueError, subprocess.CalledProcessError):
             print('credential unavailable: ' + endpoint, file=sys.stderr)
             failed = True
     if failed:
-        raise ValueError('some workers are offline; dispatch will provision them when available')
+        raise ValueError('incomplete distribution; available hosts can provision peers before submission')
+
+
+def install(root, token):
+    store(root, token)
+    distribute(token, tomllib.loads((root / 'host.conf').read_text())['workers'], 'store')
 
 
 def client(arguments):
@@ -87,16 +93,7 @@ def client(arguments):
     warnings.simplefilter('error', getpass.GetPassWarning)
     token = validate(getpass.getpass('GitHub token (selected repositories, Contents: read-only): ').encode())
     subprocess.run(['git', 'config', '--global', 'ci-buddy.token', hashlib.sha256(token).hexdigest()], check=True)
-    failed = False
-    for endpoint in dict.fromkeys(endpoints):
-        try:
-            rpc(endpoint, 'install', token)
-            print('credentials installed: ' + endpoint)
-        except (OSError, ValueError, subprocess.CalledProcessError):
-            print('credential unavailable: ' + endpoint, file=sys.stderr)
-            failed = True
-    if failed:
-        raise ValueError('incomplete distribution; available hosts can provision peers before submission')
+    distribute(token, endpoints, 'install', announce=True)
 
 
 if __name__ == '__main__':

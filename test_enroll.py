@@ -26,22 +26,18 @@ class Enrollment(unittest.TestCase):
                                      GIT_CONFIG_GLOBAL=str(self.root / 'owner.gitconfig'), GIT_CONFIG_NOSYSTEM='1'))
         self.revision = 'a' * 40
         script = r'''set -eu
-python3 - "$2" <<'PY'
-from pathlib import Path
-import sys
-root = Path(sys.argv[1])
-binary = root / 'bin'
-binary.mkdir(exist_ok=True)
-if (root / 'fail-install').exists():
-    raise SystemExit(7)
-revision = 'a' * 40
-(binary / 'revision').write_text(revision + '\n')
-(binary / 'ci-buddy').write_text("printf '%s\\n' " + revision + "\n")
-(binary / 'pueue').write_text('#!' + sys.executable + '\n')
-(binary / 'pueue').chmod(0o700)
-with (root / 'installs').open('a') as output:
-    output.write('installed\n')
-PY
+test ! -e "$2/fail-install" || exit 7
+mkdir -p "$2/bin"
+printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$2/bin/revision"
+printf 'cat "$(dirname "$0")/revision"\n' >"$2/bin/ci-buddy"
+printf '#!%s\n' "$(command -v sh)" >"$2/bin/pueue"
+cat >>"$2/bin/pueue" <<'SH'
+if test -e "$(dirname "$0")/../fail-install"; then
+    test "$6" = 1
+fi
+SH
+chmod 700 "$2/bin/pueue"
+printf 'installed\n' >>"$2/installs"
 '''
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode='w') as bundle:
@@ -84,6 +80,7 @@ workers = []
         self.auth.side_effect = None
         enroll.enroll(self.args)
         self.assertEqual((self.leaf / 'installs').read_text(), 'installed\n')
+        self.assertEqual((self.root / 'coordinator/installs').read_text(), 'installed\n')
         self.assertEqual(self.routes().count(endpoint), 1)
         self.assertFalse(list(self.leaf.glob('enroll-*')))
         self.assertFalse(list((self.root / 'coordinator').glob('enroll-*')))

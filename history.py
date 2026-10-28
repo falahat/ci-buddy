@@ -26,6 +26,18 @@ def db(folder):
     return connection
 
 
+def store(folder, values, results):
+    connection = db(folder)
+    with connection:
+        columns = ','.join('"' + key + '"' for key in values)
+        connection.execute(f'INSERT OR REPLACE INTO runs({columns}) VALUES({",".join("?" for _ in values)})', tuple(values.values()))
+        for name, status, ms, excerpt in results:
+            connection.execute('INSERT OR IGNORE INTO tests(name) VALUES(?)', (name,))
+            connection.execute('INSERT OR REPLACE INTO results VALUES((SELECT id FROM tests WHERE name=?),?,?,?,?)',
+                               (name, values['id'], status, ms, excerpt))
+    connection.close()
+
+
 def record(folder, out, read_file):
     out = Path(out)
     job = json.loads(read_file(out / "job.json"))
@@ -92,15 +104,7 @@ def record(folder, out, read_file):
             pair = [job.get(name), job.get("bench_" + name)]
             values[name] = combine(pair) if None not in pair else None
     values.update(id=int(out.name), argv=json.dumps(job["argv"]))
-    connection = db(folder)
-    with connection:
-        columns = ",".join('"' + key + '"' for key in values)
-        connection.execute(f"INSERT OR REPLACE INTO runs({columns}) VALUES({','.join('?' for _ in values)})", list(values.values()))
-        for name, status, ms, excerpt in results:
-            connection.execute("INSERT OR IGNORE INTO tests(name) VALUES(?)", (name,))
-            connection.execute("INSERT OR REPLACE INTO results VALUES((SELECT id FROM tests WHERE name=?),?,?,?,?)",
-                (name, int(out.name), status, ms, excerpt))
-    connection.close()
+    store(folder, values, results)
     return ingested
 
 
