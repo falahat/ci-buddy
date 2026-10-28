@@ -90,7 +90,7 @@ class Credentials(unittest.TestCase):
                 while not transcript.endswith(b'read-only): '):
                     transcript += master.read(4096)
                 self.assertFalse(termios.tcgetattr(terminal)[3] & termios.ECHO)
-                terminal.write(self.token + b'\n')
+                os.write(master.fileno(), self.token + b'\n')
                 terminal.close()
                 try:
                     while block := master.read(4096):
