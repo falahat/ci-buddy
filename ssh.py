@@ -132,6 +132,7 @@ def receive(command, destination, limit, display=False, payload=None, keep_input
                 if total > limit:
                     raise ValueError('worker output exceeds size limit')
                 destination.write(block)
+                destination.flush()
                 if display:
                     print(safe_output.clean(decoder.decode(block)), end='', flush=True)
             if display:
