@@ -45,14 +45,8 @@ def store(root, token):
 
 
 def rpc(endpoint, mode, token=b''):
-    host, separator, root = endpoint.partition(':')
-    root = root if separator else '.ci-buddy'
-    if (not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*', host)
-            or not (root == '.ci-buddy' or root.startswith('/')) or '\n' in root or '\r' in root):
-        raise ValueError('invalid approved endpoint')
+    host, root = ssh.endpoint(endpoint)
     command = ['python3', str(PurePosixPath(root, 'bin', 'auth.py')), mode]
-    if host == 'local' and root == '.ci-buddy':
-        root = str(Path.home() / root)
     argv = [sys.executable, str(Path(root) / 'bin/auth.py'), mode] if host == 'local' else ssh.command(host, shlex.join(command))
     return ssh.capture(argv, 512, payload=token)
 

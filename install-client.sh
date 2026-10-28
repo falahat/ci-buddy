@@ -20,7 +20,7 @@ else revision=$(<"$source_dir/revision"); fi
 [[ $revision =~ ^[0-9a-f]{40}$ ]] || exit 2
 bundle=$HOME/.local/lib/ci-buddy/$revision
 mkdir -p "$bundle" "$HOME/.local/bin"
-for name in ci-buddy safe_output.py ssh.py auth.py enroll.py; do cp "$source_dir/$name" "$bundle/$name"; done
+for name in ci-buddy safe_output.py ssh.py auth.py enroll.py enroll_remote.py; do cp "$source_dir/$name" "$bundle/$name"; done
 if [[ -e $source_dir/.git ]]; then git -C "$source_dir" archive --format=tar HEAD >"$bundle/runtime.tar"
 else cp "$source_dir/runtime.tar" "$bundle/runtime.tar"; fi
 printf '%s\n' "$revision" >"$bundle/revision"

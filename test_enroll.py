@@ -29,13 +29,18 @@ class Enrollment(unittest.TestCase):
 python3 - "$2" <<'PY'
 from pathlib import Path
 import sys
-root=Path(sys.argv[1]); binary=root/'bin'; binary.mkdir(exist_ok=True)
-if (root/'fail-install').exists(): raise SystemExit(7)
-revision='a'*40
-(binary/'revision').write_text(revision+'\n')
-(binary/'ci-buddy').write_text("printf '%s\\n' "+revision+"\n")
-(binary/'pueue').write_text('#!'+sys.executable+'\n'); (binary/'pueue').chmod(0o700)
-with (root/'installs').open('a') as output: output.write('installed\n')
+root = Path(sys.argv[1])
+binary = root / 'bin'
+binary.mkdir(exist_ok=True)
+if (root / 'fail-install').exists():
+    raise SystemExit(7)
+revision = 'a' * 40
+(binary / 'revision').write_text(revision + '\n')
+(binary / 'ci-buddy').write_text("printf '%s\\n' " + revision + "\n")
+(binary / 'pueue').write_text('#!' + sys.executable + '\n')
+(binary / 'pueue').chmod(0o700)
+with (root / 'installs').open('a') as output:
+    output.write('installed\n')
 PY
 '''
         archive = io.BytesIO()
@@ -45,7 +50,14 @@ PY
             member.size = len(body)
             bundle.addfile(member, io.BytesIO(body))
         self.archive = archive.getvalue()
-        self.conf = 'jobs = 1\nslots = 1\nmemory = "1g"\ncpus = "1"\nmin_free_gb = 500\nslot_max_gb = 5\nworkers = []\n'
+        self.conf = '''jobs = 1
+slots = 1
+memory = "1g"
+cpus = "1"
+min_free_gb = 500
+slot_max_gb = 5
+workers = []
+'''
         config = self.root / 'leaf.conf'
         config.write_text(self.conf)
         self.leaf = self.root / 'leaf'
@@ -73,6 +85,8 @@ PY
         enroll.enroll(self.args)
         self.assertEqual((self.leaf / 'installs').read_text(), 'installed\n')
         self.assertEqual(self.routes().count(endpoint), 1)
+        self.assertFalse(list(self.leaf.glob('enroll-*')))
+        self.assertFalse(list((self.root / 'coordinator').glob('enroll-*')))
 
     def test_registration_failure_restores_only_new_route_and_configuration(self):
         (self.root / 'coordinator/fail-install').touch()
@@ -81,6 +95,7 @@ PY
         self.assertEqual(self.routes(), [self.coordinator])
         self.assertEqual((self.root / 'coordinator/host.conf').read_text(), self.conf)
         self.assertTrue((self.leaf / 'bin/revision').exists())
+        self.assertFalse(list((self.root / 'coordinator').glob('enroll-*')))
 
     def test_existing_route_survives_auth_failure(self):
         endpoint = 'local:' + str(self.leaf)

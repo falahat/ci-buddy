@@ -4,6 +4,7 @@ import io
 import ipaddress
 import os
 from pathlib import Path
+import re
 import socket
 import stat
 import subprocess
@@ -20,6 +21,17 @@ OPTIONS = ['-q', '-T', '-x', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking
 NETWORKS = tuple(ipaddress.ip_network((address, bits)) for address, bits in (
     ('127.0.0.0', 8), ('10.0.0.0', 8), ('172.16.0.0', 12),
     ('192.168.0.0', 16), ('100.64.0.0', 10), ('::1', 128), ('fc00::', 7)))
+
+
+def endpoint(value):
+    host, separator, root = value.partition(':')
+    root = root if separator else '.ci-buddy'
+    if (not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*', host)
+            or not (root == '.ci-buddy' or root.startswith('/')) or any(c in root for c in '\r\n')):
+        raise ValueError('invalid approved runner endpoint')
+    if host == 'local' and root == '.ci-buddy':
+        root = str(Path.home() / root)
+    return host, root
 
 
 def configuration():
