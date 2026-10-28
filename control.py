@@ -149,7 +149,10 @@ def watch(root, project, run):
         os.link('/proc/self/fd/' + str(log.fileno()), linked, follow_symlinks=True)
         process = reader([sys.executable, __file__, str(root), project, 'phase', run])
         sent = 0
-        with subprocess.Popen(['tail', '-n', '+1', '-f', '--pid=' + str(process.pid), str(linked)],
+        follow = ['tail', '-n', '+1', '-f', '--pid=' + str(process.pid)]
+        if '--use-polling' in subprocess.check_output(['tail', '--help'], text=True):
+            follow.append('--use-polling')
+        with subprocess.Popen([*follow, str(linked)],
                               stdin=log, stdout=subprocess.PIPE) as tail:
             while block := tail.stdout.read1(65536):
                 sys.stdout.buffer.write(block)
