@@ -20,6 +20,10 @@ import auth
 SSH = [sys.executable, str(Path(__file__).with_name('ssh.py'))]
 
 
+def transport(host, command):
+    return command if host == 'local' else SSH + [host, shlex.join(command)]
+
+
 def distance(root, project, commit):
     folder = root / 'projects' / project
     choices = []
@@ -146,7 +150,7 @@ def main():
     def discard(host, worker_root):
         command = ['git', '-C', str(Path(worker_root, 'projects', project, 'git')), 'update-ref', '-d', 'refs/ci-buddy/' + identifier]
         try:
-            if subprocess.run(SSH + [host, shlex.join(command)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            if subprocess.run(transport(host, command), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
                 return
         except OSError:
             pass
@@ -159,21 +163,24 @@ def main():
             host, worker_root = endpoint.split(':', 1)
             if not host or host.startswith('-') or any(c.isspace() for c in host) or not worker_root:
                 raise ValueError('invalid endpoint')
+            if host == 'local' and not Path(worker_root).is_absolute():
+                raise ValueError('local worker root must be absolute')
             server = ['bash', str(Path(worker_root, 'bin', 'ci-buddy')), '--server', project]
-            revision = capture(SSH + [host, shlex.join(server + ['version'])]).decode().strip()
+            revision = capture(transport(host, server + ['version'])).decode().strip()
             if revision != (root / 'bin/revision').read_text().strip():
                 raise ValueError('version differs')
-            subprocess.run(SSH + [host, shlex.join(server + ['init'])], check=True,
+            subprocess.run(transport(host, server + ['init']), check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             token = auth.read(root)
             if token:
                 auth.rpc(endpoint, 'store', token)
             staged = True
+            target = str(Path(worker_root, 'projects', project, 'git'))
             subprocess.run(['git', '-C', str(folder / 'git'), 'push', '--quiet',
-                host + ':' + str(Path(worker_root, 'projects', project, 'git')), job['commit'] + ':refs/ci-buddy/' + identifier],
+                target if host == 'local' else host + ':' + target, job['commit'] + ':refs/ci-buddy/' + identifier],
                 check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 env=os.environ | {'GIT_SSH_COMMAND': shlex.join(SSH), 'GIT_SSH_VARIANT': 'simple'})
-            value = json.loads(capture(SSH + [host, shlex.join(server + ['distance', job['commit']])]))
+            value = json.loads(capture(transport(host, server + ['distance', job['commit']])))
             if not isinstance(value, list) or len(value) != 2 or any(type(x) is not int or x < 0 for x in value):
                 raise ValueError('invalid distance')
             return tuple(value), host, worker_root
@@ -203,7 +210,7 @@ def main():
     command = server + ['submit', identifier, job['kind'], job['commit'], job['base'], job['branch'], job['submitter']] + arguments + job['argv']
     print('worker=' + job['worker'], flush=True)
     with (out / 'runner.log').open('xb') as log:
-        status = receive(SSH + [host, shlex.join(command)], log, OUTPUT_LIMIT, display=True)
+        status = receive(transport(host, command), log, OUTPUT_LIMIT, display=True)
     remote_logs = str(Path(worker_root, 'projects', project, 'logs'))
     saved = folder / 'logs' / time.strftime('%Y-%m') / (identifier + '.tar.zst')
     saved.parent.mkdir(parents=True, exist_ok=True)
@@ -211,7 +218,7 @@ def main():
         temporary = Path(temporary)
         compressed, decoded = temporary / 'return.tar.zst', temporary / 'return.tar'
         with compressed.open('xb') as output:
-            code = receive(SSH + [host, 'cat ' + shlex.quote(remote_logs) + '/*/' + shlex.quote(identifier + '.tar.zst')], output, OUTPUT_LIMIT)
+            code = receive(transport(host, ['bash', '-c', 'cat ' + shlex.quote(remote_logs) + '/*/' + shlex.quote(identifier + '.tar.zst')]), output, OUTPUT_LIMIT)
         if code:
             raise subprocess.CalledProcessError(code, 'worker archive transfer')
         with decoded.open('xb') as output:
@@ -221,7 +228,7 @@ def main():
         returned = temporary / 'results'
         returned.mkdir()
         unpack_results(decoded, returned)
-        exported = capture(SSH + [host, shlex.join(server + ['export', identifier])], HISTORY_LIMIT)
+        exported = capture(transport(host, server + ['export', identifier]), HISTORY_LIMIT)
         row, results = validate_history(json.loads(exported), job, identifier, status)
         if saved.exists() or (out / 'worker-results').exists():
             raise ValueError('worker return already exists')

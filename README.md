@@ -141,23 +141,27 @@ machine explicitly:
 tailworker up gcp --name "$name" --hours 1 --dry-run
 ```
 
-After creation, install the reviewed ci-buddy commit used by the coordinator.
-Prepare a leaf `worker.conf` with the ordinary explicit resource/disk limits
-and `workers = []`. From that ci-buddy checkout:
+After creation, install the reviewed ci-buddy client used by the coordinator.
+Keep the reviewed `tailworker` command on the control host's owner PATH. Prepare
+a leaf `worker.conf` with explicit resource/disk limits and `workers = []`, then:
 
 ```sh
-worker=tw-$name
-revision=$(git rev-parse HEAD)
-git archive --add-virtual-file=revision:"$revision" HEAD | \
-  ssh "$worker" 'mkdir -p ~/ci-buddy; tar -x -C ~/ci-buddy'
-ssh "$worker" 'umask 077; mkdir -p ~/.ci-buddy; cat >~/.ci-buddy/host.conf' <worker.conf
-ssh "$worker" 'bash ~/ci-buddy/install.sh --root "$HOME/.ci-buddy"'
-ssh "$worker" 'printf "%s\n" "$HOME/.ci-buddy"'
+ci-buddy enroll "$name" --root "$worker_root" --host-conf worker.conf
 ```
 
-Use the last command's absolute root with the `tw-<name>` alias in the
-coordinator's `workers` array, then reinstall the coordinator once to update
-Pueue capacity. Its owner SSH configuration includes tailworker's aliases and
-pinned host keys. An offline worker fails the availability probe and work runs
-on the coordinator. Its enrolled source token is copied before dispatch.
-Ordinary submissions never create or start machines.
+The command resolves the existing logical machine, sends only the local
+reviewed runner archive, verifies readiness, synchronizes the enrolled fetch
+token and adds the leaf to an approved coordinator's workers. The coordinator
+defaults to the first owner `ci-buddy.host`; `--coordinator destination:root`
+selects another approved endpoint. Its own SSH configuration must already have
+the worker alias, approved authentication and host pin; enrollment copies no
+keys. A local leaf must share the coordinator's machine.
+
+New roots must be empty; existing roots must have the same reviewed revision
+and host settings. Coordinator updates use the native installer/Pueue capacity
+commands without restarting running work. Failed registration restores changed
+configuration and removes only a newly added owner route. Existing routes and
+credentials remain. Normal jobs can use the free leaf through the existing
+commit-distance picker; exclusive work and gates with a bench retain their
+coordinator locality. Offline workers fall back before acceptance. Ordinary
+submissions never create or start machines.

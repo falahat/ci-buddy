@@ -82,9 +82,9 @@ def command(destination, remote):
 def receive(command, destination, limit, display=False, payload=None):
     # Bound bytes, not execution time. No transport failure resubmits a job.
     decoder = codecs.getincrementaldecoder('utf-8')('replace')
-    with subprocess.Popen(command, stdin=subprocess.PIPE if payload is not None else None,
+    with subprocess.Popen(command, stdin=subprocess.PIPE if isinstance(payload, bytes) else payload,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
-        if payload is not None:
+        if isinstance(payload, bytes):
             process.stdin.write(payload)
             process.stdin.close()
         try:

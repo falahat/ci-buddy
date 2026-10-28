@@ -8,6 +8,14 @@ if [[ ${1:-} != --server ]]; then
     [[ $revision =~ ^[0-9a-f]{40}$ ]] || exit 2
     command=${1:?command required}; shift
     if [[ $command == auth ]]; then exec python3 "$client_dir/auth.py" client "$@"; fi
+    if [[ $command == enroll ]]; then
+        arguments=()
+        while (($#)); do
+            if [[ $1 == --root ]]; then arguments+=("--root=${2:?root required}"); shift 2
+            else arguments+=("$1"); shift; fi
+        done
+        MSYS2_ARG_CONV_EXCL="--root=${MSYS2_ARG_CONV_EXCL:+;$MSYS2_ARG_CONV_EXCL}" exec python3 "$client_dir/enroll.py" "${arguments[@]}"
+    fi
     case $command in
         run|test|gate) probe=(version) ;;
         status|history|log|cancel|verify|merge) probe=(version --read-only) ;;
@@ -244,7 +252,8 @@ case $command in
             if [[ -f $folder/runs/$run/job.json ]]; then
                 worker=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("worker", ""))' "$folder/runs/$run/job.json")
                 if [[ -n $worker ]]; then
-                    python3 "$root/bin/ssh.py" "${worker%%:*}" "bash $(printf '%q' "${worker#*:}/bin/ci-buddy") --server $(printf '%q ' "$project" cancel "$run")"
+                    if [[ ${worker%%:*} == local ]]; then bash "${worker#*:}/bin/ci-buddy" --server "$project" cancel "$run"
+                    else python3 "$root/bin/ssh.py" "${worker%%:*}" "bash $(printf '%q' "${worker#*:}/bin/ci-buddy") --server $(printf '%q ' "$project" cancel "$run")"; fi
                 fi
             fi
             stop_container() {
