@@ -146,7 +146,16 @@ def watch(root, project, run):
         return status
     with log:
         process = reader([sys.executable, __file__, str(root), project, 'phase', run])
-        subprocess.run(['tail', '-n', '+1', '-f', '--pid=' + str(process.pid)], stdin=log, check=True)
+        sent = 0
+        with subprocess.Popen(['tail', '-n', '+1', '-f', '--pid=' + str(process.pid), '/dev/stdin'],
+                              stdin=log, stdout=subprocess.PIPE) as tail:
+            while block := tail.stdout.read1(65536):
+                sys.stdout.buffer.write(block)
+                sys.stdout.buffer.flush()
+                sent += len(block)
+            if tail.wait():
+                raise subprocess.CalledProcessError(tail.returncode, tail.args)
+        os.lseek(log.fileno(), sent, os.SEEK_SET)
         subprocess.run(['cat'], stdin=log, check=True)
         return process.wait()
 
