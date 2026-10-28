@@ -1,7 +1,7 @@
 [Unit]
-Description=Daily ci-buddy upkeep (%f)
+Description=Hourly ci-buddy upkeep (%f)
 [Timer]
-OnCalendar=daily
+OnCalendar=hourly
 Persistent=true
 [Install]
 WantedBy=timers.target
