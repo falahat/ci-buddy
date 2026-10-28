@@ -61,7 +61,7 @@ def enqueue(root, project, run):
         return answer['job_id'], prior['run']
 
 
-def recover(root, project, run, prefix, view):
+def recover(root, project, run, prefix, status=137):
     out = root / 'projects' / project / 'runs' / run
     with data.open_file(root / 'containers' / ('recover-' + project + '-' + run + '.lock'), 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -73,12 +73,12 @@ def recover(root, project, run, prefix, view):
         for name in ('ci-buddy-' + run, 'ci-buddy-prepare-' + run, 'ci-buddy-fetch-' + run):
             subprocess.run(['podman', 'wait', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         stage = prefix.replace('-', '_')
-        job.update({stage + 'exit': 137, stage + 'ended_at': time.time()})
+        job.update({stage + 'exit': status, stage + 'ended_at': time.time()})
         data.write_file(out / 'job.json', json.dumps(job))
         data.report(out, prefix)
         data.record(out)
         subprocess.run([sys.executable, str(root / 'bin/archive.py'), str(out)], check=True)
-        data.write_file(out / (prefix + 'exit'), '137\n')
+        data.write_file(out / (prefix + 'exit'), str(status) + '\n')
         data.git(out.parents[1] / 'git', 'update-ref', '-d', 'refs/ci-buddy/' + run)
 
 
@@ -89,7 +89,7 @@ def wait_run(root, project, run, prefix=''):
         return int(data.read_file(out / (prefix + 'exit')))
     with client(root) as queue:
         view = queue.wait(task)
-    recover(root, project, run, prefix, view)
+    recover(root, project, run, prefix)
     status = int(data.read_file(out / (prefix + 'exit')))
     if view['state'] != 'SUCCEEDED' and status == 0:
         raise ValueError('queue execution did not finish successfully: ' + view['state'])
@@ -118,7 +118,7 @@ def phase(root, project, run):
             if waiter.wait():
                 raise ValueError('queue wait failed; execution is not resubmitted')
             reply.seek(0)
-            recover(root, project, run, '', json.load(reply))
+            recover(root, project, run, '')
             return int(data.read_file(out / 'exit'))
         finally:
             if waiter.poll() is None:
@@ -263,7 +263,8 @@ def main():
                 task = data.read_file(out / (prefix + 'task')).strip()
                 if task and not data.read_file(out / (prefix + 'exit')).strip():
                     queue.cancel(task, reason='owner cancellation')
-                    recover(root, project, run, prefix, queue.wait(task))
+                    queue.wait(task)
+                    recover(root, project, run, prefix)
     elif command == 'distance':
         import workers
         print(json.dumps(workers.distance(root, project, args[0])))

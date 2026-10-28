@@ -73,16 +73,16 @@ def run(root, project, identifier, bench=False, worker=False):
         CHILD.wait()
     if data.read_file(out / (prefix + 'exit')).strip():
         return int(data.read_file(out / (prefix + 'exit')))
+    status = 137 if CANCELLED else (CHILD.returncode if 0 < CHILD.returncode <= 255 else 1)
+    if not worker:
+        import control
+        control.recover(root, project, identifier, prefix, status)
+        return int(data.read_file(out / (prefix + 'exit')))
     job = json.loads(data.read_file(out / 'job.json'))
     stage = prefix.replace('-', '_')
-    status = 137 if CANCELLED else (CHILD.returncode if 0 < CHILD.returncode <= 255 else 1)
     job.update({stage + 'exit': status, stage + 'ended_at': time.time()})
     data.write_file(out / 'job.json', json.dumps(job))
     data.report(out, prefix)
-    if not worker:
-        import control
-        control.recover(root, project, identifier, prefix, {})
-        return int(data.read_file(out / (prefix + 'exit')))
     subprocess.run([sys.executable, str(root / 'bin/archive.py'), str(out)], check=True)
     data.write_file(out / (prefix + 'exit'), str(status) + '\n')
     return status
