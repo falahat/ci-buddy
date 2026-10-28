@@ -147,6 +147,7 @@ def watch(root, project, run):
     with log:
         process = reader([sys.executable, __file__, str(root), project, 'phase', run])
         subprocess.run(['tail', '-n', '+1', '-f', '--pid=' + str(process.pid)], stdin=log, check=True)
+        subprocess.run(['cat'], stdin=log, check=True)
         return process.wait()
 
 
