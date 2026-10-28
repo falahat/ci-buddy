@@ -23,9 +23,13 @@ class Enrollment(unittest.TestCase):
         tools.mkdir()
         record = dict(name='existing', host='local', kind='owned', online=True)
         (tools / 'tailworker').write_text('import json\nprint(' + repr(json.dumps(record)) + ')\n')
-        service = tools / 'systemctl'
-        service.write_text('#!' + shutil.which('sh') + '\nfind "' + str(self.root) + '" -name fail-reload | grep -q . && exit 7\nexit 0\n')
-        service.chmod(0o700)
+        commands = {'systemd-escape': "printf 'fixture\\n'\n",
+                    'systemctl': 'printf "%s\\n" "$*" >>"' + str(self.root / 'reloads') + '"\n'
+                                 'find "' + str(self.root) + '" -name fail-reload | grep -q . && exit 7\nexit 0\n'}
+        for name, body in commands.items():
+            service = tools / name
+            service.write_text('#!' + shutil.which('sh') + '\n' + body)
+            service.chmod(0o700)
         self.enterContext(patch.dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'],
                                      GIT_CONFIG_GLOBAL=str(self.root / 'owner.gitconfig'), GIT_CONFIG_NOSYSTEM='1'))
         self.revision = 'a' * 40
@@ -85,6 +89,7 @@ workers = []
         enroll.enroll(self.args)
         self.assertNotIn(endpoint, self.routes())
         self.assertEqual((self.root / 'coordinator/capacity').read_text(), '2\n')
+        self.assertEqual((self.root / 'reloads').read_text(), '--user reload ci-buddy-dispatch@fixture.service\n')
         for root in (self.leaf, self.root / 'coordinator'):
             self.assertEqual((root / 'installs').read_text(), 'installed\n')
             self.assertFalse(list(root.glob('enroll-*')))
