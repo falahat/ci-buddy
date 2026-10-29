@@ -9,6 +9,12 @@ import time
 import tomllib
 
 
+RUNTIME = (
+    "ci-buddy control.py execute.py data.py history.py archive.sh results.py safe_output.py "
+    "ssh.py auth.py enroll.py install.sh fetch.Containerfile fetch.sh upkeep.sh"
+).split()
+
+
 def git(folder, *args):
     return subprocess.check_output(["git", "-C", str(folder), *args], text=True).strip()
 

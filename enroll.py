@@ -46,15 +46,11 @@ def enroll(root, args):
         limits = data.host_config(stage)
         if limits['fetch_hosts']:
             raise ValueError('a leaf host.conf requires fetch_hosts = []')
-        runtime = root / 'bin/runtime.tar'
-        (stage / 'revision').write_text(revision)
         with tempfile.TemporaryFile() as payload:
-            with tarfile.open(runtime) as original, tarfile.open(fileobj=payload, mode='w') as archive:
-                for entry in original:
-                    if not entry.isdir() and PurePosixPath(entry.name).as_posix() not in {'host.conf', 'revision'}:
-                        archive.addfile(entry, original.extractfile(entry) if entry.isfile() else None)
-                for filename in ('host.conf', 'revision'):
-                    archive.add(stage / filename, arcname=filename, recursive=False)
+            with tarfile.open(fileobj=payload, mode='w') as archive:
+                for filename in [*data.RUNTIME, 'units', 'revision']:
+                    archive.add(root / 'bin' / filename, arcname=filename)
+                archive.add(stage / 'host.conf', arcname='host.conf')
             payload.seek(0)
             subprocess.run(remote + ['bash', '-c', data.read_file(root / 'bin/install.sh'), '_',
                                      '--root', args.root, '--archive'], stdin=payload, check=True)

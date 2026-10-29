@@ -1,12 +1,10 @@
 """Coordinator setup uses the reviewed runtime installer and native command kit."""
-import io
 import json
 import os
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
-import tarfile
 import tempfile
 import types
 import unittest
@@ -22,17 +20,16 @@ class Enrollment(unittest.TestCase):
         path.chmod(0o700)
 
     def runtime(self, link=False):
-        path = self.root / 'bin/runtime.tar'
-        with tarfile.open(path, 'w') as archive:
-            item = tarfile.TarInfo('install.sh')
-            body = b'set -eu\ntest "$1" = --root\ntest "$3" = --worker\nmkdir -p "$2/bin"\ncp "$(dirname "$0")/revision" "$2/bin/revision"\n'
-            item.size = len(body)
-            archive.addfile(item, io.BytesIO(body))
-            if link:
-                item = tarfile.TarInfo('unsafe')
-                item.type, item.linkname = tarfile.SYMTYPE, '../../escape'
-                archive.addfile(item)
-        return path
+        for name in enroll.data.RUNTIME:
+            (self.root / 'bin' / name).write_text('')
+        (self.root / 'bin/units').mkdir(exist_ok=True)
+        installer = Path(enroll.__file__).with_name('install.sh')
+        self.script(self.root / 'bin/install.sh',
+            'if [[ $3 == --worker ]]; then\nmkdir -p "$2/bin"\ncp "$(dirname "$0")/revision" "$2/bin/revision"\n' +
+            'else exec bash ' + shlex.quote(str(installer)) + ' "$@"; fi\n')
+        if link:
+            (self.root / 'bin/fetch.sh').unlink()
+            (self.root / 'bin/fetch.sh').symlink_to('../../escape')
 
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -45,7 +42,6 @@ class Enrollment(unittest.TestCase):
         (self.root / 'host.conf').write_text(self.conf)
         (self.root / 'worker.conf').write_text(self.conf)
         (self.root / 'bin/revision').write_text('a' * 40)
-        shutil.copyfile(Path(enroll.__file__).with_name('install.sh'), self.root / 'bin/install.sh')
         self.runtime()
         record = dict(name='existing', host='local', kind='owned', online=True)
         # Unit jobs may be UID 0 inside a rootless container; simulate the host prerequisite.

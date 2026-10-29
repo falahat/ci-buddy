@@ -86,11 +86,12 @@ if primary != root:
         else:
             path.symlink_to(target)
 assert subprocess.check_output(['podman', 'info', '--format', '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}'], text=True).strip() == 'true v2', 'rootless Podman with cgroup v2 required'
-for name in 'ci-buddy control.py execute.py data.py history.py archive.sh results.py safe_output.py ssh.py auth.py enroll.py install.sh fetch.Containerfile fetch.sh upkeep.sh'.split():
+for name in data.RUNTIME:
     temporary = root / 'bin' / (name + '.new')
     shutil.copyfile(source / name, temporary)
     temporary.chmod(0o700)
     temporary.replace(root / 'bin' / name)
+shutil.copytree(source / 'units', root / 'bin/units', dirs_exist_ok=True)
 (root / 'bin/revision.new').write_text(revision + '\n')
 (root / 'bin/revision.new').replace(root / 'bin/revision')
 for name in ('machine.lock', 'turnstile'):
@@ -104,11 +105,6 @@ if not args.worker:
     shutil.copytree(bundle / 'kit', root / 'dispatch/kit', dirs_exist_ok=True)
     shutil.copyfile(bundle / 'kit/plane.sh', root / 'bin/plane.sh')
     shutil.copyfile(source / 'queue.toml', root / 'dispatch/plane.toml')
-if (source / '.git').exists():
-    with (root / 'bin/runtime.tar').open('wb') as runtime:
-        subprocess.run(['git', '-C', str(source), 'archive', '--format=tar', 'HEAD'], stdout=runtime, check=True)
-elif not args.worker:
-    shutil.copyfile(source / 'runtime.tar', root / 'bin/runtime.tar')
 subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
 subprocess.run(['systemctl', '--user', 'enable', '--now', 'ci-buddy-upkeep@' + instance + '.timer'], check=True)
 PY
