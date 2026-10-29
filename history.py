@@ -33,11 +33,14 @@ def db(folder):
     return connection
 
 
-def store(folder, values, results):
+def store(folder, values, results=()):
     connection = db(folder)
     with connection:
         columns = ','.join('"' + key + '"' for key in values)
         connection.execute(f'INSERT OR REPLACE INTO runs({columns}) VALUES({",".join("?" for _ in values)})', tuple(values.values()))
+        if values.get('reused_from') is not None:
+            connection.execute('INSERT OR REPLACE INTO results SELECT test,?,status,ms,excerpt FROM results WHERE run=?',
+                               (values['id'], values['reused_from']))
         for name, status, ms, excerpt in results:
             connection.execute('INSERT OR IGNORE INTO tests(name) VALUES(?)', (name,))
             connection.execute('INSERT OR REPLACE INTO results VALUES((SELECT id FROM tests WHERE name=?),?,?,?,?)',
@@ -48,8 +51,6 @@ def store(folder, values, results):
 def record(folder, out, read_file):
     out = Path(out)
     job = json.loads(read_file(out / "job.json"))
-    ingested = time.time()
-    watermark = job.get("junit_ingested_at", job["queued_at"])
     results, total, xml_bytes = {}, 0, 0
     def add(name, status, ms, excerpt):
         nonlocal total
@@ -65,8 +66,6 @@ def record(folder, out, read_file):
         if len(results) > 100000 or total > HISTORY_LIMIT:
             raise ValueError('test result count or byte limit exceeded')
     for path in out.rglob("junit.xml"):
-        if path.stat().st_mtime < watermark:
-            continue
         text = read_file(path, HISTORY_LIMIT + 1)
         xml_bytes += len(text.encode())
         if xml_bytes > HISTORY_LIMIT:
@@ -131,7 +130,6 @@ def record(folder, out, read_file):
             values[name] = combine(pair) if None not in pair else None
     values.update(id=int(out.name), argv=json.dumps(job["argv"]))
     store(folder, values, ((name, *value[0]) for name, value in results.items()))
-    return ingested
 
 
 def query(folder, argv):

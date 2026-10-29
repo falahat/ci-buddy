@@ -1,3 +1,4 @@
+from contextlib import closing
 import fcntl
 import hashlib
 import json
@@ -121,25 +122,22 @@ def reuse_finished(folder, run):
     out = folder / "runs" / run
     job = json.loads(read_file(out / "job.json"))
     if job["key"] and not job["rerun"]:
-        database = history.db(folder)
-        for row in database.execute('SELECT * FROM runs WHERE key=? AND reused_from IS NULL ORDER BY id DESC', (job["key"],)):
-            prior = dict(row)
-            if prior['exit'] is None:
-                continue
-            original = prior["id"]
-            prior.update(id=int(run), commit=job["commit"], branch=job["branch"], submitter=job["submitter"],
-                         queued_at=job["queued_at"], started_at=time.time(), ended_at=time.time(), cpu_s=0, peak_bytes=None, reused_from=original)
-            columns = ','.join('"' + key + '"' for key in prior)
-            with database:
-                database.execute(f'INSERT INTO runs ({columns}) VALUES ({",".join("?" for _ in prior)})', tuple(prior.values()))
-                database.execute('INSERT INTO results SELECT test,?,status,ms,excerpt FROM results WHERE run=?', (int(run), original))
-            job.update(reused_from=original, exit=prior["exit"], overall_exit=prior["exit"])
-            write_file(out / "job.json", json.dumps(job))
-            write_file(out / "exit", str(prior["exit"]))
-            previous = folder / "runs" / str(original) / "report.txt"
-            report = read_file(previous) if previous.exists() else json.dumps(prior)
-            write_file(out / "report.txt", f"reused_from={original}\n{report}")
-            return str(original)
+        with closing(history.db(folder)) as database:
+            row = database.execute('SELECT * FROM runs WHERE key=? AND reused_from IS NULL AND exit IS NOT NULL ORDER BY id DESC LIMIT 1', (job["key"],)).fetchone()
+        if row is None:
+            return
+        prior = dict(row)
+        original = prior["id"]
+        prior.update(id=int(run), commit=job["commit"], branch=job["branch"], submitter=job["submitter"],
+                     queued_at=job["queued_at"], started_at=time.time(), ended_at=time.time(), cpu_s=0, peak_bytes=None, reused_from=original)
+        history.store(folder, prior)
+        job.update(reused_from=original, exit=prior["exit"], overall_exit=prior["exit"])
+        write_file(out / "job.json", json.dumps(job))
+        write_file(out / "exit", str(prior["exit"]))
+        previous = folder / "runs" / str(original) / "report.txt"
+        report = read_file(previous) if previous.exists() else json.dumps(prior)
+        write_file(out / "report.txt", f"reused_from={original}\n{report}")
+        return str(original)
 
 
 def gate_run(folder, commit):
@@ -151,15 +149,11 @@ def gate_run(folder, commit):
             continue
         if job["kind"] == "gate" and job["commit"] == commit:
             return path.parent.name
-    else:
-        raise ValueError("no gate recorded for this commit")
+    raise ValueError("no gate recorded for this commit")
 
 
 def record(output):
-    path = output / "job.json"
-    job = json.loads(read_file(path))
-    job["junit_ingested_at"] = history.record(output.parents[1], output, read_file)
-    write_file(path, json.dumps(job))
+    history.record(output.parents[1], output, read_file)
     return (output.parents[1] / "history.sqlite").stat().st_size
 
 
@@ -218,8 +212,6 @@ def main():
     elif command == "host":
         config = host_config(Path(args[0]))
         emit({key: config[key] for key in ("jobs", "slots", "memory", "cpus", "min_free_gb", "slot_max_gb", "keep_days")})
-    elif command == "record":
-        print(f"history_bytes={record(Path(args[0]))}")
     elif command == "affected":
         output, repository = map(Path, args)
         job = json.loads(read_file(output / "job.json"))
