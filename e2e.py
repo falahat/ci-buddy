@@ -68,7 +68,10 @@ from pathlib import Path
 root = Path(sys.argv[1])
 assert root.is_dir() and root.resolve() != (Path.home() / '.ci-buddy').resolve(), 'use a private root'
 project = root / 'projects' / 'example'
-out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
+sys.path.insert(0,str(root/'bin'))
+import history
+def document():
+    return json.loads(history.run(project,sys.argv[2])['document'])
 """
 
     def run_probe(action, run=""):
@@ -120,7 +123,7 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
 
     subprocess.run(["git", "switch", "--quiet", "--detach"], cwd=source, check=True)
     detached = run_id(call("run", "--", "true"))
-    run_probe("assert json.loads((out / 'job.json').read_text())['branch'] == ''", detached)
+    run_probe("assert document()['job']['branch'] == ''", detached)
     subprocess.run(["git", "switch", "--quiet", "main"], cwd=source, check=True)
 
     running = launch("run", "--", "python3", "-c",
@@ -132,7 +135,7 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
         container = json.loads(subprocess.check_output(administer(worker_destination,
             ["podman", "inspect", "ci-buddy-" + run]), encoding="utf-8"))[0]
         assert container['HostConfig']['NetworkMode'] == 'none', container
-        slot = next(mount['Source'] for mount in container['Mounts'] if mount['Destination'] == '/work/src').removesuffix('/src')
+        slot = next(str(Path(mount['Source']).parent) for mount in container['Mounts'] if mount['Destination'] == '/work/src')
     finally:
         if running.poll() is None:
             call("cancel", run)
@@ -150,7 +153,6 @@ import control
 with control.client(root) as queue:
     view = queue.job(sys.argv[2])
 assert view['state'] == 'FAILED' and view.get('reason')
-assert not (out/'result.json').exists()
 assert control.history.run(project,sys.argv[2])['exit'] is None""", rejected)
     call("run", "--", "sh", "-c",
          '! printf wrong >"$CI_BUDDY_DATA/probe"; test "$(cat "$CI_BUDDY_DATA/probe")" = readable')
@@ -160,7 +162,7 @@ assert control.history.run(project,sys.argv[2])['exit'] is None""", rejected)
     try:
         assert gate.poll() is None, 'gate returned before profiling completed'
         assert any(row['job_id'] == run and row['state'] == 'RUNNING' and row.get('progress') == dict(phase='profiling', correctness_exit=0) for row in json.loads(call('status'))['jobs'])
-        worker_probe("job = json.loads((work / 'job.json').read_text())\nassert job['steps'][0]['exit'] == 0 and job.get('exit') is None\n(out / 'release').write_text('release')", run)
+        worker_probe("(out / 'release').write_text('release')", run)
         gate.communicate()
     finally:
         if gate.poll() is None:
@@ -173,7 +175,7 @@ assert control.history.run(project,sys.argv[2])['exit'] is None""", rejected)
     subprocess.run(author + ["commit", "-qam", "red gate"], cwd=source, check=True)
     red = call("gate", status=1)
     run = run_id(red)
-    run_probe("job = json.loads((out / 'job.json').read_text())\nassert job['exit'] == 1 and len(job['steps']) == 1 and job['steps'][0]['exit'] == 1", run)
+    run_probe("job = document()['result']\nassert job['exit'] == 1 and len(job['steps']) == 1 and job['steps'][0]['exit'] == 1", run)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
     call("verify", commit, status=1)
     assert "reused_from=" not in call("test"), "changed tree reused an old result"
@@ -236,7 +238,7 @@ bundle.unlink()""", queued_run)
         # The fixture's only consumers belong to the separately installed worker.
         worker = call("test", "--rerun", "-E", "package(=consumer)")
         run = run_id(worker)
-        run_probe("assert json.loads((out / 'job.json').read_text())['node']", run)
+        run_probe("assert document()['node']", run)
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
         answer = json.loads(call("history", "change", commit))["answer"]
         assert answer, "worker result did not return to the coordinator history"

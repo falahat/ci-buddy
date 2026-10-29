@@ -55,10 +55,12 @@ class Enrollment(unittest.TestCase):
                     kit=str(self.root / 'kit'), runner=str(self.root / 'runner'), node='coordinator', signer='false')
         self.script(self.root / 'bin/plane.sh', 'printf "%s\\n" ' + shlex.quote(json.dumps(info)) + '\n')
         (self.root / 'kit/common.sh').write_text('remote() { test "$1" = local; shift; "$@"; }\n')
+        self.script(self.root / 'tools/systemd-escape', 'printf \"fixture-root\\n\"\n')
+        self.script(self.root / 'tools/systemctl', 'test "$2" = enable\n')
         events = shlex.quote(str(self.root / 'events'))
-        self.script(self.root / 'kit/install-command.sh', 'test "$1" = --env\ncp "$2" ' +
+        self.script(self.root / 'kit/install.sh', 'test "$1" = --env\ncp "$2" ' +
                     shlex.quote(str(self.root / 'profiles')) + '/"$(basename "$2")"\nprintf "installed\\n" >>' + events + '\n')
-        self.script(self.root / 'kit/enroll-command.sh', 'grep -Fq ' + shlex.quote(self.endpoint) + ' ' +
+        self.script(self.root / 'kit/enroll.sh', 'grep -Fq ' + shlex.quote(self.endpoint) + ' ' +
                     shlex.quote(str(self.root / 'host.conf')) + '\nprintf "start\\n" >>' + events +
                     '\ntest ! -e ' + shlex.quote(str(self.root / 'fail-start')) + '\n')
         self.enterContext(patch.dict(os.environ, PATH=str(self.root / 'tools') + os.pathsep + os.environ['PATH']))
@@ -104,7 +106,7 @@ class Enrollment(unittest.TestCase):
         self.assertRaises(subprocess.CalledProcessError, enroll.enroll, self.root, self.args)
         self.assertEqual((self.leaf / 'bin/revision').read_text(), 'b' * 40)
         self.runtime(link=True)
-        self.assertRaisesRegex(ValueError, 'links or special', enroll.enroll, self.root, self.args)
+        self.assertRaises(subprocess.CalledProcessError, enroll.enroll, self.root, self.args)
         payload = io.BytesIO()
         with tarfile.open(fileobj=payload, mode='w') as archive:
             archive.add(self.root / 'bin/runtime.tar', arcname='runtime.tar')

@@ -1,20 +1,44 @@
-"""One ordered native job, with private context and rootless project steps."""
+"""Native job execution with direct rootless Podman steps and shared locks."""
+from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import time
 
+import auth
 import data
 import results
 
 CHILD = None
-CANCELLED = False
-CURRENT = None
+CANCELLED = KILLED = False
+CONTAINER = None
+STATS = '{ cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > /work/step/'
+COMMAND = '''wrapper=$1; shift
+if [ -n "$wrapper" ]; then eval "set -- $wrapper \\"\\$@\\""; fi
+"$@"; status=$?
+for profile in target/nextest/*; do
+    junit=$profile/junit.xml
+    [ -f "$junit" ] && [ "$junit" -nt /work/step/start ] || continue
+    profile=${profile##*/}
+    mkdir -p "/work/step/junit/$profile"
+    cp -p "$junit" "/work/step/junit/$profile/junit.xml" || exit 1
+done
+''' + STATS + 'stats\nexit "$status"'
+TEST = '''command=$1; affected=$2; shift 2
+listing=${command/nextest run/nextest list}
+for policy in fail pass warn; do listing=${listing/ --no-tests $policy/}; done
+bash -c "$listing --message-format json" >"$CI_BUDDY_OUT/all-tests.json" || exit $?
+[ -z "$affected" ] || set -- "$@" -E "$affected"
+bash -c "$listing --message-format json \\"\\$@\\"" list "$@" >"$CI_BUDDY_OUT/selected-tests.json" || exit $?
+bash -c "$command \\"\\$@\\"" test "$@"
+'''
 
 
 def identity(project, identifier=None):
@@ -25,84 +49,228 @@ def identity(project, identifier=None):
 
 
 def interrupt(signum, frame):
-    global CANCELLED
+    global CANCELLED, KILLED
     CANCELLED = True
-    for name in ('ci-buddy-', 'ci-buddy-prepare-', 'ci-buddy-fetch-'):
-        name += CURRENT
-        if subprocess.run(['podman', 'container', 'exists', name]).returncode == 0:
-            subprocess.run(['podman', 'kill', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(['podman', 'wait', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    unconfirmed = False
+    if CONTAINER:
+        exists = subprocess.run(['podman', 'container', 'exists', CONTAINER]).returncode
+        if exists == 0:
+            killed = subprocess.run(['podman', 'kill', CONTAINER], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            stopped = subprocess.run(['podman', 'wait', CONTAINER], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            KILLED |= killed and stopped
+            unconfirmed |= not stopped
+        elif exists != 1:
+            unconfirmed = True
     if CHILD is not None and CHILD.poll() is None:
-        os.killpg(CHILD.pid, signal.SIGTERM)
+        try:
+            os.killpg(CHILD.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            CHILD.wait()
+        else:
+            CHILD.wait()
+            KILLED = True
+    if unconfirmed:
+        raise RuntimeError('owned container cleanup is unconfirmed')
+
+
+def cancelled(signum, frame):
+    interrupt(signum, frame)
+    if not KILLED:
+        raise InterruptedError('cancelled before starting a command')
+
+
+def run(argv, log, fds=()):
+    global CHILD, CONTAINER
+    if CANCELLED:
+        raise InterruptedError('cancelled before command started')
+    CONTAINER = next((arg[7:] for arg in argv if isinstance(arg, str) and arg.startswith('--name=')), None)
+    CHILD = subprocess.Popen(list(map(str, argv)), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             pass_fds=fds, start_new_session=True)
+    if CANCELLED:
+        interrupt(signal.SIGTERM, None)
+    try:
+        for block in iter(lambda: CHILD.stdout.read1(65536), b''):
+            log.buffer.write(block)
+            log.flush()
+            sys.stdout.buffer.write(block)
+            sys.stdout.buffer.flush()
+    except BaseException:
+        if not CANCELLED:
+            interrupt(signal.SIGTERM, None)
+        CHILD.wait()
+        raise
+    status = CHILD.wait()
+    if status:
+        if status < 0 and not KILLED:
+            interrupt(signal.SIGTERM, None)
+            raise RuntimeError('runner command terminated by signal')
+        raise subprocess.CalledProcessError(137 if KILLED else status, argv)
+
+
+@contextmanager
+def choose_slot(root, folder, job, limits):
+    with data.open_file(root / 'containers/picker.lock', 'a') as picker:
+        fcntl.flock(picker, fcntl.LOCK_EX)
+        order = [job['slot']] if 'slot' in job else data.slots(folder / 'git', job['commit'], limits['slots'])
+        selected = None
+        for number in order:
+            slot = folder / 'slots' / str(number)
+            slot.mkdir(parents=True, exist_ok=True)
+            lock = data.open_file(slot / 'lock', 'a')
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock.close()
+            else:
+                selected = lock
+                break
+        if selected is None:
+            number = order[0]
+            slot = folder / 'slots' / str(number)
+            selected = data.open_file(slot / 'lock', 'a')
+            fcntl.flock(selected, fcntl.LOCK_EX)
+        job['slot'] = number
+    try:
+        yield slot, selected.fileno()
+    finally:
+        selected.close()
+
+
+def run_step(root, project, identifier, work, job, index, slot, slot_fd):
+    step = job['steps'][index]
+    folder, out = root / 'projects' / project, work / 'artifacts/out'
+    raw = work / 'artifacts/steps' / step['name']
+    raw.mkdir(parents=True)
+    limits = data.host_config(root)
+    with data.open_file((root / 'turnstile').resolve(), 'a') as turnstile, \
+            data.open_file((root / 'machine.lock').resolve(), 'a') as machine, data.open_file(raw / 'runner.log', 'w') as log:
+        fcntl.flock(turnstile, fcntl.LOCK_EX)
+        fcntl.flock(machine, fcntl.LOCK_EX if step['exclusive'] else fcntl.LOCK_SH)
+        fcntl.flock(turnstile, fcntl.LOCK_UN)
+        if shutil.disk_usage(root).free < limits['min_free_gb'] * 10**9:
+            raise OSError('free disk below configured floor')
+        fds = slot_fd, machine.fileno()
+        def phase(name):
+            step.setdefault('phases', []).append([name, time.time()])
+        def checked(*argv):
+            run(argv, log, fds)
+        def build(image, context, recipe):
+            with data.open_file(root / 'containers' / (image + '.lock'), 'a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if subprocess.run(['podman', 'image', 'exists', image]).returncode:
+                    checked('podman', 'build', '--retry=0', '--memory=' + limits['memory'],
+                            '--memory-swap=' + limits['memory'], '-t', image, '-f', context / recipe, context)
+        step['started_at'] = time.time()
+        phase('checkout')
+        (slot / 'src').mkdir(exist_ok=True)
+        if not (slot / 'git').exists():
+            checked('git', 'clone', '--quiet', '--bare', folder / 'git', slot / 'git')
+        repository = ['git', '-c', 'core.hooksPath=' + str(root / 'bin'), '-c', 'core.fsmonitor=false',
+                      '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '--git-dir=' + str(slot / 'git'), '--work-tree=' + str(slot / 'src')]
+        for args in (['fetch', '--quiet', str(folder / 'git'), job['commit'], job['base']],
+                     ['checkout', '--quiet', '--force', '--detach', job['commit']], ['clean', '-fdq', '-e', 'target', '-e', '.git'],
+                     ['update-ref', 'refs/remotes/origin/main', job['base']]):
+            checked(*repository, *args)
+        data.git(folder / 'git', 'update-ref', 'refs/slots/' + str(job['slot']), job['commit'])
+        data.git_view(slot / 'git', slot / 'src/.git')
+        phase('image')
+        config = data.image(project, slot / 'git', slot / 'context')
+        build(config['image_name'], slot / 'context', config['containerfile'])
+        digest = hashlib.sha256(b''.join((root / 'bin' / name).read_bytes() for name in ('fetch.Containerfile', 'fetch.sh'))).hexdigest()
+        context = root / 'containers' / ('fetch-' + digest)
+        context.mkdir(exist_ok=True)
+        for name in ('fetch.Containerfile', 'fetch.sh'):
+            shutil.copyfile(root / 'bin' / name, context / name)
+        fetch_image = 'ci-buddy-fetch:' + digest
+        build(fetch_image, context, 'fetch.Containerfile')
+        for path in ('cargo/registry', 'cargo/git', 'sccache'):
+            (root / path).mkdir(parents=True, exist_ok=True)
+        common = ['podman', 'run', '--rm', '--init', '--pull=never', '--hostname=' + os.uname().nodename,
+                  '--memory=' + limits['memory'], '--memory-swap=' + limits['memory'], '--pids-limit=8192']
+        common += ['--preserve-fd=' + str(fd) for fd in fds]
+        for source, target in ((out, '/work/out'), (raw, '/work/step'), (work / 'job.json', '/work/out/job.json:ro')):
+            common += ['-v', str(source) + ':' + target]
+        environment = dict(CARGO_HOME='/work/cargo', RUSTC_WRAPPER='sccache', SCCACHE_DIR='/work/sccache',
+                           CI_BUDDY_PROJECT=project, CI_BUDDY_RUN=identifier, CI_BUDDY_KIND=step['kind'],
+                           CI_BUDDY_COMMIT=job['commit'], CI_BUDDY_BASE=job['base'], CI_BUDDY_OUT='/work/out', CI_BUDDY_DATA='/work/data')
+        common += [part for key, value in environment.items() for part in ('-e', key + '=' + value)]
+        dependencies = [part for name in ('registry', 'git') for part in ('-v', str(root / 'cargo' / name) + ':/work/cargo/' + name + ':ro')]
+        phase('fetch')
+        fetch = common + ['--name=ci-buddy-fetch-' + identifier, '-v', str(slot / 'git') + ':/work/repository:ro', '-w', '/tmp']
+        for name in ('registry', 'git', '.package-cache', '.package-cache-mutate'):
+            fetch += ['-v', str(root / 'cargo' / name) + ':/work/cargo/' + name]
+        fetch += ['-v', str(folder / 'secrets') + ':/run/secrets:ro', '-e', 'GIT_CONFIG_GLOBAL=/run/secrets/gitconfig',
+                  '-e', 'GIT_SSH_COMMAND=ssh -F /run/secrets/ssh/config', '-e', 'CARGO_NET_GIT_FETCH_WITH_CLI=true']
+        if (root / 'github-token').exists() or (root / 'github-token').is_symlink():
+            auth.read(root)
+            fetch += ['-v', str(root / 'github-token') + ':/work/token:ro']
+        checked(*fetch, '--entrypoint', 'bash', fetch_image, '/work/fetch.sh')
+        project_args = dependencies + ['-v', str(slot / 'src') + ':/work/src', '-v', str(root / 'sccache') + ':/work/sccache', '-w', '/work/src']
+        if limits['cpus']:
+            project_args += ['--cpus=' + limits['cpus']]
+        if (root / 'sccache.env').is_file():
+            project_args += ['--env-file', str(root / 'sccache.env')]
+        if config.get('prepare'):
+            phase('prepare')
+            checked(*common, *project_args, '--name=ci-buddy-prepare-' + identifier, '-v', str(folder / 'data') + ':/work/data',
+                    config['image_name'], 'sh', '-c', 'eval "$1"; status=$?; ' + STATS + 'prepare-stats; exit "$status"', 'prepare', config['prepare'])
+        argv = step['argv']
+        if step['kind'] == 'test':
+            affected = data.affected(job, slot / 'git', out / 'metadata.json')
+            argv = ['bash', '-c', TEST, 'test', config['test'], affected, *argv]
+        elif step['kind'] in ('gate', 'bench'):
+            argv = ['bash', '-c', config[step['kind']]]
+        phase('command')
+        (raw / 'start').touch()
+        if step['exclusive']:
+            project_args += ['--security-opt', 'seccomp=unconfined']
+        checked(*common, *project_args, '--name=ci-buddy-' + identifier, '--network=none',
+                '-v', str(folder / 'data') + ':/work/data:' + ('rw' if step['exclusive'] else 'ro'), '-e', 'CARGO_NET_OFFLINE=true',
+                config['image_name'], 'sh', '-c', COMMAND, 'run', config.get('wrapper', ''), *argv)
 
 
 def pipeline(root, project, identifier, work, job):
-    global CHILD
-    path = work / 'job.json'
     progress = work / 'invoke-progress.json'
-    correctness, announced, status = None, False, 137
-    for index, plan in enumerate(job['steps']):
-        job = json.loads(data.read_file(path))
-        job['steps'][index]['queued_at'] = job['queued_at'] if index == 0 else time.time()
-        data.write_file(path, json.dumps(job))
-        value = dict(phase=plan['name'])
-        if correctness is not None:
-            value['correctness_exit'] = correctness
-        data.write_file(progress, json.dumps(value))
-        if correctness is not None:
-            print('correctness_exit=' + str(correctness), flush=True)
-            announced = True
-        CHILD = None
-        if not CANCELLED:
-            CHILD = subprocess.Popen(['bash', str(root / 'bin/job.sh'), str(root), project, identifier,
-                                      str(path), str(index), str(work / 'artifacts')], start_new_session=True)
-            if CANCELLED:
-                interrupt(signal.SIGTERM, None)
-            CHILD.wait()
-        job = json.loads(data.read_file(path))
-        step = job['steps'][index]
-        if 'exit' not in step:
-            step.update(exit=137 if CANCELLED else CHILD.returncode if 0 < CHILD.returncode <= 255 else 1,
-                        ended_at=time.time())
-        if CANCELLED and step['exit'] != 0:
-            step['exit'] = 137
-        status = step['exit']
-        data.write_file(path, json.dumps(job))
-        if step['name'] == 'correctness':
-            correctness = status
-        if status or CANCELLED:
-            break
+    correctness, announced = None, False
+    with choose_slot(root, root / 'projects' / project, job, data.host_config(root)) as (slot, slot_fd):
+        for index, step in enumerate(job['steps']):
+            step['queued_at'] = job['queued_at'] if index == 0 else time.time()
+            value = dict(phase=step['name'])
+            if correctness is not None:
+                value['correctness_exit'] = correctness
+            data.write_file(progress, json.dumps(value))
+            if correctness is not None:
+                print('correctness_exit=' + str(correctness), flush=True)
+                announced = True
+            try:
+                run_step(root, project, identifier, work, job, index, slot, slot_fd)
+                step['exit'] = 0
+            except subprocess.CalledProcessError as error:
+                step['exit'] = error.returncode
+            step['ended_at'] = time.time()
+            if step['name'] == 'correctness':
+                correctness = step['exit']
+            if step['exit'] or CANCELLED:
+                break
     if correctness is not None and not announced:
         print('correctness_exit=' + str(correctness), flush=True)
-    job['exit'] = 137 if CANCELLED else status
-    data.write_file(path, json.dumps(job))
+    job['exit'] = 137 if KILLED else step['exit']
     data.write_file(progress, json.dumps(dict(phase='complete', correctness_exit=correctness, exit=job['exit'])))
     return job
 
 
 def execute(root, request):
-    global CURRENT
     invocation = request['invocation']
-    params = invocation['params']
-    project, identifier = params['project'], request['job_id']
+    project, job = results.spec(invocation['params'], data.read_file(root / 'bin/revision').strip())
+    identifier = request['job_id']
     identity(project, identifier)
-    if (invocation['kind'] != 'invocation/v0' or invocation['op'] != 'command' or invocation['op_version'] != 1
-            or params != dict(project=project, revision=data.read_file(root / 'bin/revision').strip())):
+    if invocation['kind'] != 'invocation/v0' or invocation['op'] != 'command' or invocation['op_version'] != 1:
         raise ValueError('execution differs from reviewed source')
     work = Path(request['workdir']).resolve()
-    if work != Path.cwd().resolve() or request['outputs_dir'] != 'outputs':
+    source = (work / request['inputs']['source']).resolve()
+    if work != Path.cwd().resolve() or request['outputs_dir'] != 'outputs' or not source.is_relative_to(work):
         raise ValueError('native work directory differs')
-    inputs = {name: (work / request['inputs'][name]).resolve() for name in ('source', 'job')}
-    if any(not path.is_relative_to(work) for path in inputs.values()):
-        raise ValueError('staged input escapes work directory')
-    job = json.loads(data.read_file(inputs['job'], results.HISTORY_LIMIT + 1))
-    if (any(not re.fullmatch(r'[0-9a-f]{40}', job[key]) for key in ('commit', 'base', 'tree'))
-            or not 1 <= len(job['steps']) <= 2
-            or any(step['name'] not in ('correctness', 'profiling') for step in job['steps'])
-            or len({step['name'] for step in job['steps']}) != len(job['steps'])):
-        raise ValueError('invalid immutable source context')
-    CURRENT = identifier
-    signal.signal(signal.SIGTERM, interrupt)
+    signal.signal(signal.SIGTERM, cancelled)
     folder = root / 'projects' / project
     for name in ('slots', 'data', 'secrets'):
         (folder / name).mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -111,7 +279,7 @@ def execute(root, request):
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not repository.exists():
             subprocess.run(['git', 'init', '--quiet', '--bare', str(repository)], check=True)
-        data.git(repository, 'fetch', '--atomic', '--quiet', str(inputs['source']),
+        data.git(repository, 'fetch', '--atomic', '--quiet', str(source),
                  'refs/ci-buddy/source:refs/ci-buddy/' + identifier, 'refs/ci-buddy/base:refs/ci-buddy/base-' + identifier)
     try:
         if (data.git(repository, 'rev-parse', 'refs/ci-buddy/' + identifier) != job['commit']

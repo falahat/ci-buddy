@@ -18,19 +18,21 @@ class NativeCI(unittest.TestCase):
         (self.root / 'bin').mkdir()
         (self.root / 'containers').mkdir()
         (self.root / 'bin/revision').write_text('a' * 40)
-        self.job = dict(kind='gate', key='key', rerun=False, queued_at=1, argv=[],
+        (self.root / 'host.conf').write_text('jobs=1\nslots=1\nmemory="1g"\ncpus="1"\nmin_free_gb=500\nslot_max_gb=5\nfetch_hosts=[]\n')
+        self.job = dict(kind='gate', key='a' * 64, rerun=False, queued_at=1, branch='topic', submitter='owner',
                         commit='b' * 40, base='c' * 40, tree='d' * 40,
                         steps=[dict(name='correctness', kind='gate', exclusive=False, argv=[]),
                                dict(name='profiling', kind='bench', exclusive=True, argv=[])])
-        self.view = dict(job_id=ID, job_key='example/key', lane='b-' + 'a' * 12,
+        self.view = dict(job_id=ID, job_key='example/' + 'a' * 64, lane='b-' + 'a' * 12,
                          invocation_address='sha256:invocation', state='RUNNING', cancel_requested=False)
         self.spec = dict(kind='invocation/v0', op='command', op_version=1,
-                         params=dict(project='example', revision='a' * 40), inputs={'job': {'address': 'sha256:job'}})
+                         params=dict(project='example', revision='a' * 40, job=dict(self.job, queued_at='1')),
+                         inputs={'source': {'address': 'sha256:source'}})
         self.queue = MagicMock()
         self.queue.__enter__.return_value = self.queue
         self.enterContext(patch.object(control, 'client', return_value=self.queue))
         self.enterContext(patch.object(control, 'blob', side_effect=lambda root, address=None, value=None:
-            'sha256:new' if value is not None else self.job if address == 'sha256:job' else self.spec))
+            'sha256:new' if value is not None else self.spec))
 
     def test_lost_reply_uses_exact_submission_lookup_without_replay(self):
         self.queue.enqueue.side_effect = ConnectionError('reply lost')
@@ -85,17 +87,17 @@ class NativeCI(unittest.TestCase):
         path = work / 'job.json'
         path.write_text(json.dumps(self.job))
         progress, output = [], io.StringIO()
-        def child(command, **options):
-            job = json.loads(path.read_text())
-            index = int(command[6])
+        def step(root, project, identifier, work, job, index, slot, descriptor):
             progress.append(json.loads((work / 'invoke-progress.json').read_text()))
             if index:
                 self.assertIn('correctness_exit=0', output.getvalue())
-            job['steps'][index].update(exit=1 if index else first, ended_at=7 if index else 4)
-            path.write_text(json.dumps(job))
-            return MagicMock(returncode=1 if index else first)
-        with patch('sys.stdout', output), patch.object(execute, 'CANCELLED', False), \
-                patch.object(execute.subprocess, 'Popen', side_effect=child):
+            if index or first:
+                raise control.subprocess.CalledProcessError(1 if index else first, ['fixture-command'])
+        slot = MagicMock()
+        slot.__enter__.return_value = work, 3
+        with patch('sys.stdout', output), patch.object(execute, 'CANCELLED', False), patch.object(execute, 'KILLED', False), \
+                patch.object(execute, 'choose_slot', return_value=slot), patch.object(execute, 'run_step', side_effect=step), \
+                patch.object(execute.time, 'time', side_effect=[4, 5, 7]):
             job = execute.pipeline(self.root, 'example', ID, work, self.job)
         return job, progress
 

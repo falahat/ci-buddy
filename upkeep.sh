@@ -1,11 +1,20 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 export PATH="$root/bin:$PATH"
-values=$(python3 "$root/bin/data.py" host "$root"); eval "$values"
+values=$(python3 -I - "$root" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / 'bin'))
+import data
+config = data.host_config(Path(sys.argv[1]))
+for key in ('memory', 'cpus', 'min_free_gb', 'slot_max_gb', 'keep_days'):
+    print(key + '=' + shlex.quote(str(config[key])))
+PY
+); eval "$values"
 for project in "$root/projects/"*; do
     [[ -d $project ]] || continue
-    # Retention expires disposable artifacts, never the SQLite result rows.
-    [[ ! -d $project/runs ]] || find "$project/runs" -mindepth 1 -maxdepth 1 -type d -mmin "+$((keep_days * 1440))" -exec rm -rf -- {} +
+    [[ ! -d $project/logs ]] || find "$project/logs" -maxdepth 1 -type f -mmin "+$((keep_days * 1440))" -delete
     for slot in "$project/slots/"*; do
         [[ -d $slot/src/target ]] || continue
         (

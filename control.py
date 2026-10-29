@@ -28,7 +28,10 @@ def blob(root, address=None, value=None):
     with tempfile.TemporaryDirectory(dir=root / 'containers') as directory:
         path = Path(directory) / 'value.json'
         if value is not None:
-            data.write_file(path, json.dumps(value))
+            content = json.dumps(value)
+            if len(content.encode()) > results.HISTORY_LIMIT:
+                raise ValueError('job arguments exceed the 16 MiB invocation budget')
+            data.write_file(path, content)
             return results.cas(root, 'put', path)
         results.cas(root, 'get', address, path, limit=results.HISTORY_LIMIT)
         return json.loads(data.read_file(path, results.HISTORY_LIMIT + 1))
@@ -36,14 +39,12 @@ def blob(root, address=None, value=None):
 
 def context(root, view, project=None):
     spec = blob(root, address=view['invocation_address'])
-    params = spec['params']
-    name = params['project']
-    identity(name, view['job_id'])
     revision = data.read_file(root / 'bin/revision').strip()
+    name, job = results.spec(spec['params'], revision, project)
+    identity(name, view['job_id'])
     if (spec['kind'] != 'invocation/v0' or spec['op'] != 'command' or spec['op_version'] != 1
-            or params != dict(project=name, revision=revision) or project is not None and project != name):
+            or spec['inputs'].keys() != {'source'}):
         raise ValueError('native invocation differs from reviewed project')
-    job = blob(root, address=spec['inputs']['job']['address'])
     key = job['key'] if job['key'] and not job['rerun'] else view['invocation_address']
     if view['job_key'] != name + '/' + key or view['lane'] != lane(revision, job['steps'][0]['exclusive']):
         raise ValueError('native cache identity or lane differs')
@@ -52,6 +53,9 @@ def context(root, view, project=None):
 
 def enqueue(root, project, nonce, job):
     folder = root / 'projects' / project
+    revision = data.read_file(root / 'bin/revision').strip()
+    params = dict(project=project, revision=revision, job=dict(job, queued_at=str(job['queued_at'])))
+    results.spec(params, revision, project)
     with tempfile.TemporaryDirectory(dir=root / 'containers') as directory:
         bundle = Path(directory) / 'source.bundle'
         try:
@@ -62,10 +66,8 @@ def enqueue(root, project, nonce, job):
         finally:
             for name in ('source', 'base'):
                 data.git(folder / 'git', 'update-ref', '-d', 'refs/ci-buddy/' + name)
-    revision = data.read_file(root / 'bin/revision').strip()
     address = blob(root, value=dict(kind='invocation/v0', op='command', op_version=1,
-        params=dict(project=project, revision=revision), inputs=dict(source=dict(address=source, kind='blob'),
-        job=dict(address=blob(root, value=job), kind='blob'))))
+        params=params, inputs=dict(source=dict(address=source, kind='blob'))))
     submission = 'ci/' + project + '/' + nonce
     key = job['key'] if job['key'] and not job['rerun'] else address
     with client(root) as queue:
@@ -78,26 +80,16 @@ def enqueue(root, project, nonce, job):
         return queue.job(answer['job_id'])
 
 
-def directory(root, project, identifier, job):
-    out = root / 'projects' / project / 'runs' / identifier
-    out.mkdir(parents=True, mode=0o700, exist_ok=True)
-    if not (out / 'job.json').exists():
-        data.write_file(out / 'job.json', json.dumps(job))
-    return out
-
-
 def settle(root, view, project=None):
     project, job = context(root, view, project)
-    out = directory(root, project, view['job_id'], job)
-    row = history.run(out.parents[1], view['job_id'])
+    folder = root / 'projects' / project
+    folder.mkdir(parents=True, exist_ok=True)
+    row = history.run(folder, view['job_id'])
     if view['state'] in ('SUCCEEDED', 'CANCELLED') and row and row['exit'] is not None:
-        if not (out / 'report.txt').exists():
-            data.write_file(out / 'report.txt', json.dumps(row))
         return row['exit']
     reason = 'native execution incomplete: ' + view['state'] + ': ' + str(view.get('reason', '')) + '\n'
     if row is None:
-        history.record(out.parents[1], view['job_id'], job, dict(steps=[], tests=[], exit=None, slot=None))
-    data.write_file(out / 'report.txt', reason)
+        history.record(folder, view['job_id'], job, dict(steps=[], tests=[], exit=None, slot=None))
     print(reason, end='', file=sys.stderr)
     return 1
 
@@ -141,7 +133,6 @@ def collect(root):
                 folder = root / 'projects' / project
                 with data.open_file(folder / 'submit.lock', 'a') as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
-                    directory(root, project, view['job_id'], job)
                     results.collect(root, project, view['job_id'], action, job)
             except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
                 print('native completion rejected: ' + str(error), file=sys.stderr)
@@ -157,18 +148,10 @@ def main():
     folder = root / 'projects' / project
     if command == 'collect':
         collect(root)
-    elif command == 'version':
-        if args not in ([], ['--read-only'], ['--worker']):
-            raise ValueError('invalid version probe')
-        if args != ['--read-only']:
-            if shutil.disk_usage(root).free < data.host_config(root)['min_free_gb'] * 10**9:
-                raise ValueError('free disk below configured floor')
-            if args != ['--worker']:
-                with client(root) as queue:
-                    queue.fleet()
-        print(data.read_file(root / 'bin/revision').strip())
     elif command == 'init':
-        for name in ('slots', 'data', 'secrets', 'runs'):
+        if shutil.disk_usage(root).free < data.host_config(root)['min_free_gb'] * 10**9:
+            raise ValueError('free disk below configured floor')
+        for name in ('slots', 'data', 'secrets'):
             (folder / name).mkdir(mode=0o700, parents=True, exist_ok=True)
         if not (folder / 'git').exists():
             subprocess.run(['git', 'init', '--quiet', '--bare', str(folder / 'git')], check=True)
@@ -180,7 +163,7 @@ def main():
             with data.open_file(folder / 'submit.lock', 'a') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 job = data.make_job(folder, *request[:5], request[5:])
-                previous = history.reuse(folder, job['key']) if job['key'] and not job['rerun'] else None
+                previous = history.find(folder, 'key=? AND exit IS NOT NULL AND document IS NOT NULL', job['key']) if job['key'] and not job['rerun'] else None
                 if previous:
                     with client(root) as queue:
                         if queue.job(previous['id'])['state'] != 'SUCCEEDED':
@@ -188,12 +171,12 @@ def main():
                 if previous:
                     print('reused_from=' + previous['id'], flush=True)
                     print('run=' + previous['id'] + ' task=' + previous['id'], flush=True)
-                    report = folder / 'runs' / previous['id'] / 'report.txt'
-                    print(data.read_file(report) if report.exists() else json.dumps(previous))
+                    print(json.loads(previous['document'])['result']['report'])
                     return previous['exit']
                 view = enqueue(root, project, nonce, job)
                 project, original = context(root, view, project)
-                directory(root, project, view['job_id'], original)
+                if history.run(folder, view['job_id']) is None:
+                    history.record(folder, view['job_id'], original, dict(steps=[], tests=[], exit=None, slot=None))
                 if original != job:
                     print('reused_from=' + view['job_id'], flush=True)
             print('run=' + view['job_id'] + ' task=' + view['job_id'], flush=True)
@@ -206,14 +189,15 @@ def main():
         commit = args[0]
         if not re.fullmatch('[0-9a-f]{40}', commit):
             raise ValueError('invalid commit')
-        candidates = [(out, json.loads(data.read_file(out / 'job.json'))) for out in (folder / 'runs').iterdir()]
-        out, job = next((out, job) for out, job in sorted(candidates, reverse=True)
-                        if job['kind'] == 'gate' and job['commit'] == commit)
+        row = history.find(folder, 'kind=? AND "commit"=? AND document IS NOT NULL', 'gate', commit)
+        if row is None:
+            raise ValueError('no completed gate for this commit')
         with client(root) as queue:
-            status = settle(root, queue.wait(out.name), project)
-        print(data.read_file(out / 'report.txt'), end='')
+            status = settle(root, queue.wait(row['id']), project)
+        document = json.loads(history.run(folder, row['id'])['document'])
+        print(document['result'].get('report', ''), end='')
         if status == 0:
-            print('verified=' + commit + ' base=' + job['base'])
+            print('verified=' + commit + ' base=' + document['job']['base'])
         return 0 if status == 0 else 1
     elif command == 'status':
         with client(root) as queue:

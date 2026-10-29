@@ -89,7 +89,9 @@ completion. Ask `history test <name>`, `history failures --branch <branch>` or
 `--range <base>..<tip>`, `history slowest [--since 7d]`, `history change <ref>`,
 `history flaky` or `history gates [--days 7]`. Hourly upkeep skips busy slots,
 respects exclusive work, and uses cargo-sweep with seven-day age and slot_max_gb.
-Artifact retention follows keep_days; history rows remain.
+The coordinator stores each validated result document once in SQLite and retains
+opaque compressed log archives for keep_days. It never extracts those archives;
+history remains after log expiry and worker cleanup.
 
 Enroll an existing approved tailworker with
 `ci-buddy enroll NAME --root DIRECTORY --host-conf FILE`. The coordinator installs

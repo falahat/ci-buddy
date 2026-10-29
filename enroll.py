@@ -47,13 +47,12 @@ def enroll(root, args):
         if limits['fetch_hosts']:
             raise ValueError('a leaf host.conf requires fetch_hosts = []')
         runtime = root / 'bin/runtime.tar'
-        with tarfile.open(runtime) as archive:
-            if any(not entry.isfile() and not entry.isdir() for entry in archive):
-                raise ValueError('reviewed runtime contains links or special files')
         (stage / 'revision').write_text(revision)
         with tempfile.TemporaryFile() as payload:
-            with tarfile.open(fileobj=payload, mode='w') as archive:
-                archive.add(runtime, arcname='runtime.tar', recursive=False)
+            with tarfile.open(runtime) as original, tarfile.open(fileobj=payload, mode='w') as archive:
+                for entry in original:
+                    if not entry.isdir() and PurePosixPath(entry.name).as_posix() not in {'host.conf', 'revision'}:
+                        archive.addfile(entry, original.extractfile(entry) if entry.isfile() else None)
                 for filename in ('host.conf', 'revision'):
                     archive.add(stage / filename, arcname=filename, recursive=False)
             payload.seek(0)
@@ -69,7 +68,7 @@ def enroll(root, args):
                           COMMAND=shlex.join([python, str(worker_root / 'bin/execute.py'), args.root]))
             environment = stage / (identifier + '.env')
             environment.write_text(''.join(key + '=' + shlex.quote(value) + '\n' for key, value in public.items()))
-            subprocess.run(['bash', str(kit / 'install-command.sh'), '--env', str(environment),
+            subprocess.run(['bash', str(kit / 'install.sh'), '--env', str(environment),
                             '--machine', args.name, '--runner', info['runner']], check=True)
             profiles.append((identifier, lanes))
         endpoint = machine['host'] + ':' + args.root
@@ -84,8 +83,10 @@ def enroll(root, args):
                 data.write_file(root / 'host.conf', ''.join(key + ' = ' + json.dumps(value) + '\n' for key, value in config.items()))
         for identifier, lanes in profiles:
             signer = info['signer'] + ' --lanes ' + shlex.quote(lanes)
-            subprocess.run(['bash', str(kit / 'enroll-command.sh'), '--name', identifier, '--machine', args.name,
+            subprocess.run(['bash', str(kit / 'enroll.sh'), '--name', identifier, '--machine', args.name,
                             '--signer', signer, '--note', identifier + ' ' + args.name], check=True)
+    instance = subprocess.check_output(['systemd-escape', '--path', str(root)], text=True).strip()
+    subprocess.run(['systemctl', '--user', 'enable', '--now', 'ci-buddy-collect@' + instance + '.service'], check=True)
     print('enrolled=' + args.name + ' node=' + node)
 
 

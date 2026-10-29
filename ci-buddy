@@ -3,6 +3,8 @@ set +x
 if [[ ${1:-} == --server ]]; then
     shift
     root=$(cd "$(dirname "$0")/.." && pwd -P)
+    expected=${1:?reviewed client revision required}; shift
+    [[ $(<"$root/bin/revision") == "$expected" ]] || { echo 'coordinator reviewed version differs; no job submitted' >&2; exit 2; }
     exec python3 "$root/bin/control.py" "$root" "$@"
 fi
 [[ -n ${BASH_SOURCE[0]:-} ]] || { echo 'use the installed local ci-buddy client' >&2; exit 2; }
@@ -13,9 +15,7 @@ else revision=$(git -C "$client_dir" rev-parse --verify HEAD); fi
 command=${1:?command required}; shift
 case $command in
     auth) exec python3 "$client_dir/auth.py" client "$@" ;;
-    run|test|gate|bench) probe=(version) ;;
-    status|history|log|cancel|verify|merge) probe=(version --read-only) ;;
-    enroll) ;;
+    run|test|gate|bench|status|history|log|cancel|verify|merge|enroll) ;;
     *) echo 'expected run, test, gate, bench, verify, merge, status, history, log, cancel or enroll' >&2; exit 2 ;;
 esac
 mapfile -t configured < <(git config --global --get-all ci-buddy.host || true)
@@ -63,8 +63,8 @@ done <ci-buddy.toml
 [[ $name =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
 git check-ref-format "refs/heads/$main"
 invoke() {
-    if [[ $destination == local ]]; then bash "$remote_root/bin/ci-buddy" --server "$name" "$@"
-    else printf '%s\0' bash "$remote_root/bin/ci-buddy" --server "$name" "$@" | "${transport[@]}" "$destination" --argv; fi
+    if [[ $destination == local ]]; then bash "$remote_root/bin/ci-buddy" --server "$revision" "$name" "$@"
+    else printf '%s\0' bash "$remote_root/bin/ci-buddy" --server "$revision" "$name" "$@" | "${transport[@]}" "$destination" --argv; fi
 }
 remote() {
     invoke "$@" 2>&1 | python3 "$client_dir/safe_output.py"
@@ -72,10 +72,6 @@ remote() {
     ((statuses[1] == 0)) || return "${statuses[1]}"
     return "${statuses[0]}"
 }
-if ! value=$(invoke "${probe[@]}" 2>&1 | head -c 42) || [[ $value != "$revision" ]]; then
-    echo 'coordinator unavailable or reviewed version differs; no job submitted' >&2
-    exit 2
-fi
 case $command in
     status|history)
         arguments=("$@")

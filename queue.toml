@@ -1,0 +1,11 @@
+db_path = "/work/plane/queue.db"
+runner_listen = "127.0.0.1:7700"
+app_socket = "/work/plane/app.sock"
+app_listen = ""
+heartbeat_interval_s = 1
+lease_ttl_s = 30
+runner_rate_per_min = 0
+wait_for_executor = true
+job_retention_days = 90
+[default_lane]
+single_attempt = true

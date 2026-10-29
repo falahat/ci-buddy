@@ -18,30 +18,27 @@ if args.archive:
     with (root / 'install.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with tempfile.TemporaryDirectory(dir=root) as directory:
-            stage = pathlib.Path(directory)
+            source = pathlib.Path(directory)
             with tarfile.open(fileobj=os.fdopen(3, 'rb'), mode='r|') as payload:
-                seen = set()
+                seen, size = set(), 0
                 for entry in payload:
-                    assert entry.isfile() and not entry.issparse() and entry.size <= 16 * 1024 * 1024
-                    assert entry.name in {'runtime.tar', 'host.conf', 'revision'} - seen, 'invalid installer payload'
+                    size += entry.size
+                    assert entry.isfile() and not entry.issparse() and size <= 16 * 1024 * 1024
+                    relative = pathlib.PurePosixPath(entry.name)
+                    assert not relative.is_absolute() and '..' not in relative.parts
+                    entry.name = relative.as_posix()
+                    assert entry.name not in seen and len(seen) < 256, 'duplicate or excessive runtime files'
                     seen.add(entry.name)
-                    payload.extract(entry, stage, filter='data')
-            assert seen == {'runtime.tar', 'host.conf', 'revision'}, 'incomplete installer payload'
-            source = stage / 'source'
-            source.mkdir()
-            with tarfile.open(stage / 'runtime.tar') as runtime:
-                assert all(entry.isfile() or entry.isdir() for entry in runtime), 'runtime contains links or special files'
-                runtime.extractall(source, filter='data')
-            revision = (stage / 'revision').read_text().strip()
-            conf = stage / 'host.conf'
+                    payload.extract(entry, source, filter='data')
+            assert {'install.sh', 'host.conf', 'revision'} <= seen, 'incomplete installer payload'
+            revision = (source / 'revision').read_text().strip()
+            conf = source / 'host.conf'
             if (root / 'host.conf').exists():
                 assert (root / 'bin/revision').read_text().strip() == revision, 'update the existing runtime explicitly'
                 assert tomllib.loads((root / 'host.conf').read_text()) == tomllib.loads(conf.read_text()), 'existing host.conf differs'
             else:
-                assert {path.name for path in root.iterdir()} == {'install.lock', stage.name}, 'runner root is not empty'
+                assert {path.name for path in root.iterdir()} == {'install.lock', source.name}, 'runner root is not empty'
                 shutil.copyfile(conf, root / 'host.conf')
-            for name in ('runtime.tar', 'revision'):
-                shutil.copyfile(stage / name, source / name)
             subprocess.run(['bash', str(source / 'install.sh'), '--root', str(root), '--worker'], check=True)
     raise SystemExit
 for tool in ('podman', 'git', 'python3', 'zstd', 'systemctl', 'systemd-escape'):
@@ -100,7 +97,7 @@ if primary != root:
         else:
             path.symlink_to(target)
 assert subprocess.check_output(['podman', 'info', '--format', '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}'], text=True).strip() == 'true v2', 'rootless Podman with cgroup v2 required'
-for name in 'ci-buddy control.py execute.py data.py history.py archive.py results.py safe_output.py ssh.py auth.py enroll.py install.sh plane.sh fetch.Containerfile fetch.sh job.sh upkeep.sh'.split():
+for name in 'ci-buddy control.py execute.py data.py history.py archive.sh results.py safe_output.py ssh.py auth.py enroll.py install.sh fetch.Containerfile fetch.sh upkeep.sh'.split():
     temporary = root / 'bin' / (name + '.new')
     shutil.copyfile(source / name, temporary)
     temporary.chmod(0o700)
@@ -111,15 +108,17 @@ for name in ('machine.lock', 'turnstile'):
     (root / name).touch()
 if not args.worker:
     bundle = args.dispatch_dir
-    assert bundle and os.access(bundle / 'runner', os.X_OK) and (bundle / 'dispatch_client/__init__.py').is_file() and (bundle / 'kit/install-command.sh').is_file(), 'provide the reviewed dispatcher bundle with --dispatch-dir'
+    assert bundle and os.access(bundle / 'runner', os.X_OK) and (bundle / 'dispatch_client/__init__.py').is_file() and (bundle / 'kit/install.sh').is_file() and (bundle / 'kit/plane.sh').is_file(), 'provide the reviewed dispatcher bundle with --dispatch-dir'
     shutil.copyfile(bundle / 'runner', root / 'bin/runner')
     (root / 'bin/runner').chmod(0o700)
     shutil.copytree(bundle / 'dispatch_client', root / 'bin/dispatch_client', dirs_exist_ok=True)
     shutil.copytree(bundle / 'kit', root / 'dispatch/kit', dirs_exist_ok=True)
+    shutil.copyfile(bundle / 'kit/plane.sh', root / 'bin/plane.sh')
+    shutil.copyfile(source / 'queue.toml', root / 'dispatch/plane.toml')
 if (source / '.git').exists():
     with (root / 'bin/runtime.tar').open('wb') as runtime:
         subprocess.run(['git', '-C', str(source), 'archive', '--format=tar', 'HEAD'], stdout=runtime, check=True)
-else:
+elif not args.worker:
     shutil.copyfile(source / 'runtime.tar', root / 'bin/runtime.tar')
 subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
 subprocess.run(['systemctl', '--user', 'enable', '--now', 'ci-buddy-upkeep@' + instance + '.timer'], check=True)

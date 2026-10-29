@@ -16,7 +16,7 @@ def db(folder):
     connection.row_factory = sqlite3.Row
     connection.executescript('''PRAGMA journal_mode=WAL;
         CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, kind, key, tree, "commit", branch, submitter,
-            slot, argv, queued_at, started_at, ended_at, exit, cpu_s, peak_bytes);
+            slot, argv, queued_at, started_at, ended_at, exit, cpu_s, peak_bytes, document);
         CREATE TABLE IF NOT EXISTS tests(id INTEGER PRIMARY KEY, name UNIQUE);
         CREATE TABLE IF NOT EXISTS results(test, run, status, ms, excerpt,
             PRIMARY KEY(test, run)) WITHOUT ROWID;
@@ -40,24 +40,23 @@ def store(folder, values, results=()):
     connection.close()
 
 
-def reuse(folder, key):
+def find(folder, condition, *parameters):
     with closing(db(folder)) as connection:
-        row = connection.execute('SELECT * FROM runs WHERE key=? AND exit IS NOT NULL ORDER BY ended_at DESC LIMIT 1', (key,)).fetchone()
+        row = connection.execute('SELECT * FROM runs WHERE ' + condition + ' ORDER BY queued_at DESC LIMIT 1', parameters).fetchone()
         return dict(row) if row else None
 
 
 def run(folder, identifier):
-    with closing(db(folder)) as connection:
-        row = connection.execute('SELECT * FROM runs WHERE id=?', (identifier,)).fetchone()
-        return dict(row) if row else None
+    return find(folder, 'id=?', identifier)
 
 
-def record(folder, identifier, job, result):
+def record(folder, identifier, job, result, **metadata):
     steps = result['steps']
     values = {key: job.get(key) for key in ('kind', 'key', 'tree', 'commit', 'branch', 'submitter', 'queued_at')}
-    values.update(id=identifier, argv=json.dumps(job['argv']), slot=result['slot'], exit=result['exit'],
+    values.update(id=identifier, argv=json.dumps(job['steps'][0]['argv']), slot=result['slot'], exit=result['exit'],
                   started_at=steps[0].get('started_at') if steps else None,
-                  ended_at=steps[-1]['ended_at'] if steps else None)
+                  ended_at=steps[-1]['ended_at'] if steps else None,
+                  document=json.dumps(dict(job=job, result=result, **metadata)))
     for field, combine in (('cpu_s', sum), ('peak_bytes', max)):
         numbers = [step.get(field) for step in steps]
         values[field] = combine(numbers) if numbers and None not in numbers else None
@@ -123,8 +122,11 @@ def query(folder, argv):
             suites=select('SELECT r.id AS run,r."commit",r.ended_at,CASE WHEN COUNT(s.ms)=COUNT(*) THEN SUM(s.ms) END AS total_ms' + join + ' WHERE ' + where + ' GROUP BY r.id ORDER BY r.ended_at,r.id'))
     elif command == "change":
         failures = select('SELECT s.run,t.name,s.excerpt' + join + ' WHERE ' + where + " AND s.status='failed'")
-        answer = [dict(row) | {"failures": [item for item in failures if item["run"] == row["id"]]}
-            for row in connection.execute('SELECT * FROM runs r WHERE ' + where + ' ORDER BY ended_at,id', parameters)]
+        answer = []
+        for row in connection.execute('SELECT * FROM runs r WHERE ' + where + ' ORDER BY ended_at,id', parameters):
+            value = dict(row)
+            del value['document']
+            answer.append(value | {"failures": [item for item in failures if item["run"] == row["id"]]})
     elif command == "flaky":
         answer = select('SELECT t.name,r.tree,COUNT(*) AS runs' + join + " WHERE " + where + " AND t.name NOT LIKE 'phase/%' AND s.status IN ('passed','failed') GROUP BY t.id,r.tree HAVING COUNT(DISTINCT s.status)=2 ORDER BY t.name,r.tree")
     else:
