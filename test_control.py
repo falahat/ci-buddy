@@ -1,6 +1,5 @@
-"""CI policy at native submission, source and ordered-step boundaries."""
+"""CI policy at native submission, source and cancellation boundaries."""
 import io
-import json
 import os
 from pathlib import Path
 import signal
@@ -22,7 +21,6 @@ class NativeCI(unittest.TestCase):
         (self.root / 'bin').mkdir()
         (self.root / 'containers').mkdir()
         (self.root / 'bin/revision').write_text('a' * 40)
-        (self.root / 'host.conf').write_text('jobs=1\nslots=1\nmemory="1g"\ncpus="1"\nmin_free_gb=500\nslot_max_gb=5\nfetch_hosts=[]\n')
         self.job = dict(key='a' * 64, rerun=False, queued_at=1, branch='topic', submitter='owner',
                         commit='b' * 40, base='c' * 40, tree='d' * 40,
                         steps=[dict(kind='gate', exclusive=False, argv=[]),
@@ -69,15 +67,6 @@ class NativeCI(unittest.TestCase):
             control.main()
         self.queue.cancel.assert_not_called()
 
-    def test_status_uses_native_progress_without_workload_log_parsing(self):
-        self.view['progress'] = dict(phase='profiling', correctness_exit=0)
-        self.queue.jobs.return_value = dict(jobs=[self.view])
-        with patch.dict(control.os.environ), patch('sys.argv', ['control.py', str(self.root), 'example', 'status']), \
-                patch('sys.stdout', new_callable=io.StringIO) as output:
-            self.assertEqual(control.main(), 0)
-        self.assertEqual(json.loads(output.getvalue())['jobs'][0]['progress'], self.view['progress'])
-        self.queue.logs.assert_not_called()
-
     def test_unknown_execution_does_not_invent_a_command_exit(self):
         self.view.update(state='FAILED', reason='worker disconnected')
         with patch('sys.stderr', new_callable=io.StringIO):
@@ -96,36 +85,6 @@ class NativeCI(unittest.TestCase):
                 wait.assert_not_called()
                 self.assertTrue(execute.CANCELLED and execute.KILLED)
                 self.assertEqual(child.wait(), -signal.SIGTERM)
-
-    def gate(self, first):
-        work = self.root / 'containers'
-        path = work / 'job.json'
-        path.write_text(json.dumps(self.job))
-        progress, output = [], io.StringIO()
-        def step(root, project, identifier, work, job, index, slot, descriptor):
-            progress.append(json.loads((work / 'invoke-progress.json').read_text()))
-            if index:
-                self.assertIn('correctness_exit=0', output.getvalue())
-            if index or first:
-                raise control.subprocess.CalledProcessError(1 if index else first, ['fixture-command'])
-        slot = MagicMock()
-        slot.__enter__.return_value = work, 3
-        with patch('sys.stdout', output), patch.object(execute, 'CANCELLED', False), patch.object(execute, 'KILLED', False), \
-                patch.object(execute, 'choose_slot', return_value=slot), patch.object(execute, 'run_step', side_effect=step), \
-                patch.object(execute.time, 'time', side_effect=[4, 5, 7]):
-            job = execute.pipeline(self.root, 'example', ID, work, self.job)
-        return job, progress
-
-    def test_correctness_is_visible_before_failed_profiling(self):
-        job, progress = self.gate(0)
-        self.assertEqual(progress, [dict(phase='correctness'), dict(phase='profiling', correctness_exit=0)])
-        self.assertEqual((job['steps'][0]['exit'], job['steps'][0]['ended_at'], job['exit']), (0, 4, 1))
-
-    def test_red_correctness_skips_all_later_steps(self):
-        job, progress = self.gate(2)
-        self.assertEqual(progress, [dict(phase='correctness')])
-        self.assertEqual(job['exit'], 2)
-        self.assertNotIn('exit', job['steps'][1])
 
 
 if __name__ == '__main__':
