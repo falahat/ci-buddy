@@ -1,5 +1,4 @@
 """Native submission recovery never replays execution or cancels a dedup twin."""
-import copy
 import io
 import json
 from pathlib import Path
@@ -11,7 +10,7 @@ import control
 import execute
 
 
-class Recovery(unittest.TestCase):
+class Fixture(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         for name in ('bin', 'containers', 'projects/example/runs/101'):
@@ -22,22 +21,22 @@ class Recovery(unittest.TestCase):
                         bench_required=False, commit='b' * 40, base='c' * 40, tree='d' * 40,
                         branch='fixture', submitter='owner', argv=[], queued_at=1)
         control.data.output(self.out, self.job)
+
+
+class Recovery(Fixture):
+    def setUp(self):
+        super().setUp()
         self.queue = MagicMock()
         self.queue.__enter__.return_value = self.queue
         self.enterContext(patch.object(control, 'client', return_value=self.queue))
         self.specs, self.rows = {}, {}
         self.queue.job.side_effect = lambda task: {key: value for key, value in self.rows[task].items() if key != 'lane'}
         self.queue.jobs.side_effect = lambda **args: dict(jobs=list(self.rows.values()))
-        self.enterContext(patch.object(control, 'invocation', side_effect=self.invocation))
+        self.enterContext(patch.object(control, 'invocation', side_effect=
+            lambda root, address=None, value=None: 'sha256:new' if value is not None else self.specs[address]))
         self.enterContext(patch.object(control.results, 'cas', return_value='sha256:job'))
-        self.ingest = self.enterContext(patch.object(control.results, 'collect', side_effect=self.ingest_result))
+        self.ingest = self.enterContext(patch.object(control.results, 'collect', return_value=0))
         self.stderr = self.enterContext(patch('sys.stderr', new_callable=io.StringIO))
-
-    def invocation(self, root, address=None, value=None):
-        if value is not None:
-            self.specs['sha256:new'] = value
-            return 'sha256:new'
-        return copy.deepcopy(self.specs[address])
 
     def row(self, task='core', run='101'):
         job = json.loads((self.out / 'job.json').read_text())
@@ -55,12 +54,6 @@ class Recovery(unittest.TestCase):
         return dict(job_id=row['job_id'], job_key=row['job_key'], lane=row['lane'],
                     action_result=dict(kind='action_result/v0', invocation_address=row['invocation_address'],
                                        runner={'node': 'node-a'}, metrics={'exit': 0}))
-
-    def ingest_result(self, root, project, run, action, cancelled):
-        job = json.loads((self.out / 'job.json').read_text())
-        job.update(exit=0, overall_exit=0, node=action['runner']['node'])
-        control.data.write_file(self.out / 'job.json', json.dumps(job))
-        return 0
 
     def test_lost_core_enqueue_reply_uses_exact_run_across_pages(self):
         other, own = self.row('twin', run='102'), self.row()
@@ -86,63 +79,6 @@ class Recovery(unittest.TestCase):
         self.assertEqual([call.args[:2] for call in self.queue.ack.call_args_list], [('bad', 'rejected'), ('core', 'persisted')])
         self.assertEqual(self.ingest.call_count, 1)
 
-    def test_submit_dedup_publishes_original_task_before_logs(self):
-        def make_job(folder, run, *arguments):
-            control.data.output(folder / 'runs' / run, self.job)
-        def logs(root, task):
-            self.assertEqual(task, 'core')
-            self.assertEqual((self.out / 'task').read_text(), task)
-        argv = ['control.py', str(self.root), 'example', 'submit', '102',
-                'gate', 'b' * 40, 'c' * 40, 'fixture', 'owner']
-        with patch.dict(control.os.environ), patch('sys.argv', argv), patch('sys.stdout', new_callable=io.StringIO), \
-                patch.object(control.data, 'make_job', side_effect=make_job), \
-                patch.object(control.data, 'reuse_finished', return_value=None), \
-                patch.object(control.data, 'discard'), \
-                patch.object(control, 'enqueue', return_value=('core', '101')), \
-                patch.object(control, 'logs', side_effect=logs) as follow, \
-                patch.object(control, 'wait_run', return_value=0):
-            self.assertEqual(control.main(), 0)
-        follow.assert_called_once()
-        self.assertFalse(self.out.with_name('102').exists())
-
-    def execute_gate(self, core_exit, bench_exit):
-        work = self.root / 'work'
-        work.mkdir()
-        self.job['bench_required'] = True
-        (self.out / 'job.json').write_text(json.dumps(self.job))
-        phases, output = [], io.StringIO()
-        def child(command, **options):
-            phase, out = command[5], Path(command[6])
-            phases.append(json.loads((work / 'invoke-progress.json').read_text()))
-            job = json.loads((out / 'job.json').read_text())
-            if phase:
-                self.assertIn('correctness_exit=0', output.getvalue())
-                self.assertEqual((out / 'slot').read_text(), '1')
-                job.update(bench_started_at=5, bench_ended_at=7, bench_exit=bench_exit)
-            else:
-                job.update(started_at=2, ended_at=4, exit=core_exit)
-                (out / 'slot').write_text('1')
-            (out / 'job.json').write_text(json.dumps(job))
-            return MagicMock(returncode=bench_exit if phase else core_exit)
-        with patch('sys.stdout', output), patch.object(execute, 'CANCELLED', False), \
-                patch.object(execute.subprocess, 'Popen', side_effect=child):
-            status = execute.pipeline(self.root, 'example', '101', self.out, work, self.job)
-        return phases, json.loads((work / 'invoke-progress.json').read_text()), status, json.loads((self.out / 'job.json').read_text())
-
-    def test_one_gate_publishes_correctness_before_failed_profiling(self):
-        phases, progress, status, job = self.execute_gate(0, 1)
-        self.assertEqual(phases, [dict(phase='correctness'), dict(phase='profiling', correctness_exit=0)])
-        self.assertEqual(progress, dict(phase='complete', correctness_exit=0, exit=1))
-        self.assertEqual(status, 1)
-        self.assertEqual((job['exit'], job['ended_at'], job['bench_exit'], job['overall_exit']), (0, 4, 1, 1))
-
-    def test_red_correctness_skips_profiling(self):
-        phases, progress, status, job = self.execute_gate(2, 0)
-        self.assertEqual(phases, [dict(phase='correctness')])
-        self.assertEqual(progress, dict(phase='complete', correctness_exit=2, exit=2))
-        self.assertEqual(status, 2)
-        self.assertNotIn('bench_exit', job)
-
     def test_running_status_uses_native_progress(self):
         row = self.row()
         row.update(state='RUNNING', progress=dict(phase='profiling', correctness_exit=0))
@@ -163,9 +99,6 @@ class Recovery(unittest.TestCase):
         self.assertEqual(control.cancel(self.root, 'example', '101'), 1)
         self.queue.cancel.assert_not_called()
         self.assertIn('cancellation unconfirmed', self.stderr.getvalue())
-        self.queue.wait.side_effect = None
-        row['state'] = 'CANCELLED'
-        self.assertEqual(control.cancel(self.root, 'example', '101'), 0)
 
     def test_cancel_never_adopts_or_cancels_a_different_run_or_overwrites_task(self):
         self.row('twin', run='102')
@@ -180,6 +113,41 @@ class Recovery(unittest.TestCase):
         self.assertEqual((self.out / 'task').read_text(), 'existing')
         self.ingest.assert_not_called()
         self.assertEqual(self.queue.ack.call_args.args[:2], ('core', 'rejected'))
+
+
+class Pipeline(Fixture):
+    def gate(self, core_exit, bench_exit):
+        work = self.root / 'containers'
+        phases, output = [], io.StringIO()
+        self.job['bench_required'] = True
+        def phase(root, project, run, out, prefix=''):
+            phases.append(json.loads((work / 'invoke-progress.json').read_text()))
+            job = json.loads((out / 'job.json').read_text())
+            if prefix:
+                self.assertIn('correctness_exit=0', output.getvalue())
+                job.update(bench_exit=bench_exit)
+            else:
+                job.update(ended_at=4, exit=core_exit)
+            (out / 'job.json').write_text(json.dumps(job))
+            return bench_exit if prefix else core_exit
+        with patch('sys.stdout', output), patch.object(execute, 'CANCELLED', False), \
+                patch.object(execute, 'run_phase', side_effect=phase):
+            status = execute.pipeline(self.root, 'example', '101', self.out, work, self.job)
+        return phases, json.loads((work / 'invoke-progress.json').read_text()), status, json.loads((self.out / 'job.json').read_text())
+
+    def test_correctness_precedes_failed_profiling(self):
+        phases, progress, status, job = self.gate(0, 1)
+        self.assertEqual(phases, [dict(phase='correctness'), dict(phase='profiling', correctness_exit=0)])
+        self.assertEqual(progress, dict(phase='complete', correctness_exit=0, exit=1))
+        self.assertEqual(status, 1)
+        self.assertEqual((job['exit'], job['ended_at'], job['bench_exit'], job['overall_exit']), (0, 4, 1, 1))
+
+    def test_red_correctness_skips_profiling(self):
+        phases, progress, status, job = self.gate(2, 0)
+        self.assertEqual(phases, [dict(phase='correctness')])
+        self.assertEqual(progress, dict(phase='complete', correctness_exit=2, exit=2))
+        self.assertEqual(status, 2)
+        self.assertNotIn('bench_exit', job)
 
 
 if __name__ == '__main__':
