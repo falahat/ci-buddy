@@ -11,6 +11,11 @@ import tomllib
 
 root = Path(__file__).resolve().parent
 client = [shutil.which("bash"), (root / "ci-buddy").as_posix()]
+def client_command(arguments):
+    # Windows native argv quoting differs from MSYS; let Bash quote its own argv.
+    return [client[0], '-lc', shlex.join(['bash', client[1], *arguments])] if os.name == 'nt' else client + list(arguments)
+def administer(host, arguments):
+    return arguments if host == 'local' else ['ssh', host, shlex.join(arguments)]
 author = ["git", "-c", "user.name=example", "-c", "user.email=example@example.invalid"]
 endpoint = sys.argv[1]
 destination, separator, host_root = endpoint.partition(":")
@@ -36,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
     subprocess.run(author + ["commit", "-qm", "example"], cwd=source, check=True)
 
     def call(*arguments, status=0):
-        result = subprocess.run(client + list(arguments), cwd=source, encoding="utf-8",
+        result = subprocess.run(client_command(arguments), cwd=source, encoding="utf-8",
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(result.stdout, end="", flush=True)
         assert result.returncode == status, (arguments, result.returncode, status)
@@ -47,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
         return result.stdout
 
     def launch(*arguments):
-        return subprocess.Popen(client + list(arguments), cwd=source, encoding="utf-8",
+        return subprocess.Popen(client_command(arguments), cwd=source, encoding="utf-8",
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     def announced(process, marker=None):
@@ -70,13 +75,13 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
 """
 
     def run_probe(action, run=""):
-        command = shlex.join(["python3", "-c", probe + action, host_root, run])
-        return subprocess.check_output(["ssh", destination, command], encoding="utf-8")
+        return subprocess.check_output(administer(destination, ["python3", "-c", probe + action, host_root, run]),
+                                       encoding="utf-8")
 
     def worker_probe(action, run):
         script = probe.replace("/ 'runs' /", "/ 'executions' /")
-        command = shlex.join(["python3", "-c", script + action, worker_root, run])
-        return subprocess.check_output(["ssh", worker_destination, command], encoding="utf-8")
+        return subprocess.check_output(administer(worker_destination, ["python3", "-c", script + action, worker_root, run]),
+                                       encoding="utf-8")
 
     def refs():
         return run_probe("print(subprocess.check_output(['git','--git-dir',str(project/'git'),"
@@ -86,7 +91,7 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
         return next(line.split()[0].split("=")[1] for line in output.splitlines() if line.startswith("run="))
 
     run_probe("assert (root / 'bin' / 'ci-buddy').is_file()")
-    assert "argument with spaces" in call("run", "--", "printf", "%s\\n", "argument with spaces")
+    assert "argument with spaces\n" in call("run", "--", "printf", "%s\\n", "argument with spaces")
     baseline_refs = refs()
     assert "run requires a command" in call("run", "--", status=1)
     assert refs() == baseline_refs, "pre-fetch validation leaked a candidate ref"
@@ -127,8 +132,8 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
     try:
         assert running.poll() is None
         assert run in call("status")
-        mode = subprocess.check_output(["ssh", worker_destination, "podman", "inspect", "--format",
-                                        "{{.HostConfig.NetworkMode}}", "ci-buddy-" + run], encoding="utf-8")
+        mode = subprocess.check_output(administer(worker_destination, ["podman", "inspect", "--format",
+                                        "{{.HostConfig.NetworkMode}}", "ci-buddy-" + run]), encoding="utf-8")
         assert mode.strip() == "none", mode
     finally:
         if running.poll() is None:
@@ -187,10 +192,15 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
         run_probe("""sys.path.insert(0,str(root/'bin'))
 import control
 with control.client(root) as queue:
-    assert queue.job((out/'task').read_text().strip())['state'] == 'QUEUED'
+    view = queue.job((out/'task').read_text().strip())
+    assert view['state'] == 'QUEUED'
+spec = control.invocation(root, address=view['invocation_address'])
+control.results.cas(root, 'get', spec['inputs']['source']['address'], out/'bundle')
+assert subprocess.run(['git','-C',str(project/'git'),'bundle','verify',str(out/'bundle')]).returncode == 0
+(out/'bundle').unlink()
 assert not (out / 'slot').read_text().strip(), 'job fetched before cancellation'
 assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify','--quiet',
-                       'refs/ci-buddy/'+sys.argv[2]]).returncode == 0""", queued_run)
+                       'refs/ci-buddy/'+sys.argv[2]]).returncode == 1""", queued_run)
         call("cancel", queued_run)
         queued.communicate()
         assert queued.returncode == 137, queued.returncode

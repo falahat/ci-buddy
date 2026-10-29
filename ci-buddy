@@ -72,7 +72,7 @@ if [[ ${1:-} != --server ]]; then
         local endpoint=$1; shift
         endpoint_parts "$endpoint" || return
         if [[ $destination == local ]]; then bash "$remote_root/bin/ci-buddy" --server "$name" "$@"
-        else "${transport[@]}" "$destination" "bash $(printf '%q' "$remote_root/bin/ci-buddy") --server $(printf '%q ' "$name" "$@")"; fi
+        else printf '%s\0' bash "$remote_root/bin/ci-buddy" --server "$name" "$@" | "${transport[@]}" "$destination" --argv; fi
     }
     available=()
     # Probe every configured coordinator once; connection deadlines never kill jobs.

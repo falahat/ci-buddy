@@ -3,6 +3,7 @@ import ipaddress
 import os
 from pathlib import Path
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -118,8 +119,14 @@ def capture(command, limit=4096, payload=None):
 if __name__ == '__main__':
     try:
         if len(sys.argv) != 3:
-            raise ValueError('usage: ssh.py <destination> <remote-command>')
-        argv = command(*sys.argv[1:])
+            raise ValueError('usage: ssh.py <destination> <remote-command|--argv>')
+        remote = sys.argv[2]
+        if remote == '--argv':
+            payload = sys.stdin.buffer.read(16 * 1024 * 1024 + 1)
+            if len(payload) > 16 * 1024 * 1024 or not payload.endswith(b'\0'):
+                raise ValueError('invalid remote argv payload')
+            remote = shlex.join(payload[:-1].decode().split('\0'))
+        argv = command(sys.argv[1], remote)
         if os.name == 'nt':
             sys.exit(subprocess.call(argv))
         os.execvp(argv[0], argv)

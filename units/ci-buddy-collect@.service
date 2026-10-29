@@ -1,9 +1,11 @@
 [Unit]
 Description=ci-buddy completion collector (%f)
+StartLimitIntervalSec=0
 [Service]
 UMask=0077
 ExecStart=python3 "%f/bin/control.py" "%f" _ collect
 Restart=on-failure
+RestartSec=5s
 TimeoutStopSec=infinity
 [Install]
 WantedBy=default.target
