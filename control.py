@@ -150,15 +150,25 @@ def recover(out, reason):
     data.write_file(out / 'exit', '137')
 
 
-def wait_run(root, project, run):
+def wait_run(root, project, run, cancelling=False):
     out = root / 'projects' / project / 'runs' / run
     with client(root) as queue:
         with data.open_file(out.parents[1] / 'submit.lock', 'a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            if not data.read_file(out / 'task').strip() and data.read_file(out / 'exit').strip():
+            if not cancelling and not data.read_file(out / 'task').strip() and data.read_file(out / 'exit').strip():
                 return int(data.read_file(out / 'exit'))
-            task = task_for(root, queue, out)
-        settled(out, queue.wait(task))
+            try:
+                task = task_for(root, queue, out)
+            except ValueError:
+                if cancelling and not data.read_file(out / 'task').strip() and not data.read_file(out / 'exit').strip():
+                    recover(out, 'native identity unresolved; cancellation unconfirmed')
+                raise
+            if cancelling and queue.job(task)['state'] not in ('CANCELLED', 'SUCCEEDED', 'FAILED'):
+                queue.cancel(task, reason='owner cancellation')
+        view = queue.wait(task)
+        settled(out, view)
+        if cancelling and view['state'] not in ('CANCELLED', 'SUCCEEDED'):
+            raise ValueError('native state ' + view['state'])
     return int(data.read_file(out / 'exit'))
 
 
@@ -171,23 +181,8 @@ def settled(out, view):
 
 
 def cancel(root, project, run):
-    out = root / 'projects' / project / 'runs' / run
     try:
-        with client(root) as queue:
-            with data.open_file(out.parents[1] / 'submit.lock', 'a') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                try:
-                    task = task_for(root, queue, out)
-                except ValueError:
-                    if not data.read_file(out / 'task').strip() and not data.read_file(out / 'exit').strip():
-                        recover(out, 'native identity unresolved; cancellation unconfirmed')
-                    raise
-                if queue.job(task)['state'] not in ('CANCELLED', 'SUCCEEDED', 'FAILED'):
-                    queue.cancel(task, reason='owner cancellation')
-            view = queue.wait(task)
-            settled(out, view)
-            if view['state'] not in ('CANCELLED', 'SUCCEEDED'):
-                raise ValueError('native state ' + view['state'])
+        wait_run(root, project, run, cancelling=True)
         return 0
     except Exception as error:
         print('cancellation unconfirmed: ' + str(error), file=sys.stderr)
@@ -296,16 +291,13 @@ def main():
                     print(data.read_file(out / 'report.txt'), end='')
                     return int(data.read_file(out / 'exit'))
                 attempted = True
-                task, original = (data.read_file(folder / 'runs' / original / 'task').strip(), original) if original else enqueue(root, project, run)
+                task, original = enqueue(root, project, run)
                 if original != run:
                     data.discard(folder / 'git', run)
                     shutil.rmtree(out)
                     run = original
                     out = folder / 'runs' / run
                     print('reused_from=' + run, flush=True)
-                if not task:
-                    with client(root) as queue:
-                        task = task_for(root, queue, out)
                 publish_task(out, task)
             print('run=' + run + ' task=' + task, flush=True)
             logs(root, task)

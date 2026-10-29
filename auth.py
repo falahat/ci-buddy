@@ -74,8 +74,6 @@ def client(arguments):
     if arguments:
         raise ValueError('auth takes no destinations; configure the approved host pool first')
     endpoints = subprocess.check_output(['git', 'config', '--global', '--get-all', 'ci-buddy.host']).decode().splitlines()
-    if len(endpoints) != 1:
-        raise ValueError('configure exactly one approved coordinator')
     warnings.simplefilter('error', getpass.GetPassWarning)
     token = validate(getpass.getpass('GitHub token (selected repositories, Contents: read-only): ').encode())
     distribute(token, endpoints, 'install', announce=True)

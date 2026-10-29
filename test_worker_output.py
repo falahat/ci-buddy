@@ -2,6 +2,7 @@
 from contextlib import closing
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tarfile
@@ -150,6 +151,7 @@ class WorkerOutput(unittest.TestCase):
             path = self.out / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(body)
+            os.utime(path, (0, 0))
             with self.subTest(name=name, body=body[:80]), self.assertRaises((ValueError, ET.ParseError)):
                 data.record(self.out)
             path.unlink()

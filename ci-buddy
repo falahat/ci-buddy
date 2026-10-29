@@ -16,8 +16,7 @@ if [[ ${1:-} != --server ]]; then
     esac
     # Endpoints belong to owner configuration, never executable project input.
     mapfile -t configured < <(git config --global --get-all ci-buddy.host || true)
-    ((${#configured[@]} == 1)) || { echo 'configure exactly one coordinator with bash install-client.sh --host <destination>[:<root>]' >&2; exit 2; }
-    selected=${configured[0]}
+    ((${#configured[@]})) || { echo 'install a trusted client with bash install-client.sh --host <destination>[:<root>]' >&2; exit 2; }
     transport=(python3 "$client_dir/ssh.py")
     endpoint_parts() {
         destination=${1%%:*}; remote_root=.ci-buddy
@@ -30,7 +29,7 @@ if [[ ${1:-} != --server ]]; then
     if [[ $command == enroll ]]; then
         machine=${1:?existing machine required}
         shift
-        coordinator=$selected
+        coordinator=${configured[0]}
         while (($#)); do
             option=$1
             shift
@@ -49,7 +48,11 @@ if [[ ${1:-} != --server ]]; then
             esac
         done
         : "${worker_root:?worker root required}" "${host_conf:?public host.conf required}"
-        [[ $coordinator == "$selected" ]] || { echo 'coordinator differs from the approved endpoint' >&2; exit 2; }
+        allowed=false
+        for endpoint in "${configured[@]}"; do
+            [[ $endpoint != "$coordinator" ]] || allowed=true
+        done
+        $allowed || { echo 'coordinator is outside the approved host pool' >&2; exit 2; }
         endpoint_parts "$coordinator"
         arguments=(python3 "$remote_root/bin/enroll.py" "$remote_root" "$machine" "--root=$worker_root" --host-conf -)
         if [[ $destination == local ]]; then "${arguments[@]}" <"$host_conf"
@@ -65,17 +68,26 @@ if [[ ${1:-} != --server ]]; then
     : "${name:?}" "${host:?}" "${main:?}"
     [[ $name =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
     git check-ref-format "refs/heads/$main"
-    [[ ${selected%:.ci-buddy} == "${host%:.ci-buddy}" ]] || { echo 'project host differs from the approved coordinator' >&2; exit 2; }
     invoke() {
         local endpoint=$1; shift
         endpoint_parts "$endpoint" || return
         if [[ $destination == local ]]; then bash "$remote_root/bin/ci-buddy" --server "$name" "$@"
         else printf '%s\0' bash "$remote_root/bin/ci-buddy" --server "$name" "$@" | "${transport[@]}" "$destination" --argv; fi
     }
-    # Probe once; a connection deadline never kills a submitted job.
-    if ! value=$(invoke "$selected" "${probe[@]}" 2>&1 | head -c 42) || [[ $value != "$revision" ]]; then
-        echo 'coordinator unavailable or version differs; no job submitted' >&2; exit 2
-    fi
+    available=()
+    # Probe every configured coordinator once; connection deadlines never kill jobs.
+    preferred=(); others=()
+    for endpoint in "${configured[@]}"; do
+        if [[ $endpoint == "$host" || $endpoint == "$host:.ci-buddy" ]]; then preferred+=("$endpoint")
+        else others+=("$endpoint"); fi
+    done
+    for endpoint in "${preferred[@]}" "${others[@]}"; do
+        if value=$(invoke "$endpoint" "${probe[@]}" 2>&1 | head -c 42) && [[ $value == "$revision" ]]; then
+            available+=("$endpoint")
+        else printf 'host unavailable or version differs: %s\n' "$endpoint" >&2; fi
+    done
+    ((${#available[@]})) || { echo 'no configured host available; no job submitted' >&2; exit 2; }
+    selected=${available[0]}
     remote() {
         invoke "$selected" "$@" 2>&1 | python3 "$client_dir/safe_output.py"
         local statuses=("${PIPESTATUS[@]}")
@@ -90,15 +102,23 @@ if [[ ${1:-} != --server ]]; then
             elif [[ $command == history && ${1:-} == failures && ${2:-} == --range ]]; then
                 range=${3:?range required}; arguments=(failures --range "$(git rev-parse "${range%..*}")..$(git rev-parse "${range#*..}")")
             fi
-            printf 'host=%s\n' "$selected"
-            remote "$command" "${arguments[@]}"; exit $? ;;
+            result=0
+            for selected in "${available[@]}"; do
+                printf 'host=%s\n' "$selected"
+                remote "$command" "${arguments[@]}" || result=$?
+            done
+            exit "$result" ;;
         log|cancel)
             run=${1:?run required}; [[ $run =~ ^[0-9]+$ ]] || exit 2
-            value=$(invoke "$selected" has-run "$run" 2>&1 | head -c 42) || { echo 'run not found' >&2; exit 1; }
+            found=false
+            for selected in "${available[@]}"; do if value=$(invoke "$selected" has-run "$run" 2>&1 | head -c 42); then found=true; break; fi; done
+            $found || { echo 'run not found on available hosts' >&2; exit 1; }
             remote "$command" "$run"; exit $? ;;
         verify|merge)
             candidate=$(git rev-parse "${1:-HEAD}")
-            value=$(invoke "$selected" has-gate "$candidate" 2>&1 | head -c 42) || { echo 'gate not found' >&2; exit 1; }
+            found=false
+            for selected in "${available[@]}"; do if value=$(invoke "$selected" has-gate "$candidate" 2>&1 | head -c 42); then found=true; break; fi; done
+            $found || { echo 'gate not found on available hosts' >&2; exit 1; }
             if [[ $command == verify ]]; then remote verify "$candidate"; exit $?; fi
             git diff --quiet HEAD -- || { echo 'commit tracked edits before merge' >&2; exit 1; }
             candidate=$(git rev-parse HEAD)

@@ -72,11 +72,6 @@ class Credentials(unittest.TestCase):
         self.assertRaises(OSError, auth.read, root)
         for endpoint in ('public:/work/path\nbad', 'local:relative', '-option:/tmp'):
             self.assertRaises(ValueError, auth.rpc, endpoint, 'store', self.token)
-        for endpoint in ('local:' + str(root), 'local:' + str(self.root / 'other')):
-            subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', endpoint], check=True)
-        with patch('getpass.getpass') as prompt:
-            self.assertRaisesRegex(ValueError, 'exactly one', auth.client, [])
-            prompt.assert_not_called()
         owned = self.host('.ci-buddy')
         submitted = self.root / 'submitted'
         malicious = submitted / '.ci-buddy' / 'bin'
