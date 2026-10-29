@@ -178,7 +178,7 @@ def main():
                 if history.run(folder, view['job_id']) is None:
                     history.record(folder, view['job_id'], original, dict(steps=[], tests=[], exit=None, slot=None))
                 if original != job:
-                    print('reused_from=' + view['job_id'], flush=True)
+                    print('following=' + view['job_id'], flush=True)
                 data.discard(folder / 'git', nonce)
             print('run=' + view['job_id'] + ' task=' + view['job_id'], flush=True)
             logs(root, view['job_id'])
