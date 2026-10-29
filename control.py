@@ -62,7 +62,7 @@ def enqueue(root, project, run, phase='core', node=None, source=None):
                          params=dict(project=project, run=run, phase=phase, revision=revision), inputs=inputs))
     key = project + '/' + (job['key'] if job['key'] and not job['rerun'] else run)
     if phase == 'bench':
-        key = project + '/' + run + '/bench'
+        key = '/'.join((project, run, 'bench'))
     with client(root) as queue:
         answer = queue.enqueue([dict(job_key=key,
                     lane=lane(revision, phase == 'bench' or job['exclusive'], node),
