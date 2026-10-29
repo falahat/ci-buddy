@@ -1,7 +1,11 @@
 """CI policy at native submission, source and ordered-step boundaries."""
 import io
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -81,6 +85,17 @@ class NativeCI(unittest.TestCase):
         row = control.history.run(self.root / 'projects/example', ID)
         self.assertIsNone(row['exit'])
         self.assertIsNone(row['ended_at'])
+
+    def test_signal_handler_never_reaps_the_owned_child(self):
+        previous = signal.signal(signal.SIGTERM, execute.cancelled)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        with subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'], start_new_session=True) as child:
+            with patch.multiple(execute, CHILD=child, CONTAINER=None, CANCELLED=False, KILLED=False), \
+                    patch.object(child, 'wait', wraps=child.wait) as wait:
+                os.kill(os.getpid(), signal.SIGTERM)
+                wait.assert_not_called()
+                self.assertTrue(execute.CANCELLED and execute.KILLED)
+                self.assertEqual(child.wait(), -signal.SIGTERM)
 
     def gate(self, first):
         work = self.root / 'containers'

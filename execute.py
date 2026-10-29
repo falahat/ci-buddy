@@ -65,9 +65,8 @@ def interrupt(signum, frame):
         try:
             os.killpg(CHILD.pid, signal.SIGTERM)
         except ProcessLookupError:
-            CHILD.wait()
+            pass
         else:
-            CHILD.wait()
             KILLED = True
     if unconfirmed:
         raise RuntimeError('owned container cleanup is unconfirmed')
