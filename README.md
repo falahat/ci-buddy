@@ -2,6 +2,10 @@
 
 A rootless Podman build-and-test tool for Rust projects, using dispatch-service's queue.
 
+`check.py` limits core source, including unit tests, to 2,431 physical lines;
+the example and end-to-end test stay below 350. These bounds include comments
+and blank lines. The owner accepted this consolidation size on 2026-10-29.
+
 Install with `bash install.sh --root <directory> --dispatch-dir <reviewed-bundle>`
 on Linux with rootless Podman, cgroup v2, Git, Python 3.11+, zstd, tailworker and
 systemd user services. Enable user lingering. The reviewed bundle contains the

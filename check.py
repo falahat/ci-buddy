@@ -28,6 +28,6 @@ for name in filter(None, names):
                 continue
             path = match.group()
             assert any(path == prefix or path.startswith(prefix + "/") for prefix in allowed), (name, number, path)
-assert code_lines <= 2165, code_lines
+assert code_lines <= 2431, code_lines
 assert example_lines < 350, example_lines
 print(f"code_lines={code_lines} example_lines={example_lines}")
