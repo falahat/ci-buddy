@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -20,6 +21,8 @@ from control import lane
 def enroll(root, args):
     os.umask(0o077)
     os.chdir(root)
+    if not shutil.which('tailworker'):
+        os.environ['PATH'] = str(Path.home() / '.local/bin') + os.pathsep + os.environ['PATH']
     worker_root = PurePosixPath(args.root)
     if not worker_root.is_absolute() or str(worker_root) != args.root or '..' in worker_root.parts or any(c in args.root for c in '\r\n%'):
         raise ValueError('provide a normalized absolute worker root without systemd specifiers')
