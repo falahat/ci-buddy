@@ -8,7 +8,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 
 root = Path(__file__).resolve().parent
 client = [shutil.which("bash"), (root / "ci-buddy").as_posix()]

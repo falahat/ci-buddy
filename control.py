@@ -1,7 +1,6 @@
 """Native queue identity, immutable source context and normalized CI history."""
 import fcntl
 import json
-import os
 from pathlib import Path
 import re
 import shutil
@@ -37,9 +36,9 @@ def blob(root, address=None, value=None):
         return json.loads(data.read_file(path, results.HISTORY_LIMIT + 1))
 
 
-def context(root, view, project=None):
+def context(root, view, project=None, expected_revision=None):
     spec = blob(root, address=view['invocation_address'])
-    revision = data.read_file(root / 'bin/revision').strip()
+    revision = spec['params']['revision'] if expected_revision is None else expected_revision
     name, job = results.spec(spec['params'], revision, project)
     identity(name, view['job_id'])
     if (spec['kind'] != 'invocation/v0' or spec['op'] != 'command' or spec['op_version'] != 1
@@ -81,7 +80,7 @@ def enqueue(root, project, nonce, job):
 
 
 def settle(root, view, project=None):
-    project, job = context(root, view, project)
+    project, job = context(root, view, project, data.read_file(root / 'bin/revision').strip())
     folder = root / 'projects' / project
     folder.mkdir(parents=True, exist_ok=True)
     row = history.run(folder, view['job_id'])
@@ -144,7 +143,6 @@ def main():
     root, project, command, *args = sys.argv[1:]
     root = Path(root).resolve()
     identity(project)
-    os.environ['PATH'] = str(root / 'bin') + os.pathsep + os.environ['PATH']
     folder = root / 'projects' / project
     if command == 'collect':
         collect(root)
@@ -166,7 +164,8 @@ def main():
                 previous = history.find(folder, 'key=? AND exit IS NOT NULL AND document IS NOT NULL', job['key']) if job['key'] and not job['rerun'] else None
                 if previous:
                     with client(root) as queue:
-                        if queue.job(previous['id'])['state'] != 'SUCCEEDED':
+                        view = queue.job(previous['id'])
+                        if view['state'] != 'SUCCEEDED' or settle(root, view, project) != previous['exit']:
                             previous = None
                 if previous:
                     print('reused_from=' + previous['id'], flush=True)
@@ -174,7 +173,7 @@ def main():
                     print(json.loads(previous['document'])['result']['report'])
                     return previous['exit']
                 view = enqueue(root, project, nonce, job)
-                project, original = context(root, view, project)
+                project, original = context(root, view, project, data.read_file(root / 'bin/revision').strip())
                 if history.run(folder, view['job_id']) is None:
                     history.record(folder, view['job_id'], original, dict(steps=[], tests=[], exit=None, slot=None))
                 if original != job:
@@ -216,7 +215,6 @@ def main():
                 if view['state'] not in ('SUCCEEDED', 'CANCELLED', 'FAILED'):
                     queue.cancel(view['job_id'], reason='owner cancellation')
                 view = queue.wait(view['job_id'])
-                settle(root, view, project)
                 if view['state'] not in ('SUCCEEDED', 'CANCELLED'):
                     raise ValueError('cancellation unconfirmed: ' + view['state'])
     else:

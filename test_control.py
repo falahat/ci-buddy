@@ -51,19 +51,22 @@ class NativeCI(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 control.context(self.root, self.view | {key: value}, 'example')
         self.spec['params']['revision'] = 'e' * 40
-        with self.assertRaises(ValueError):
-            control.context(self.root, self.view, 'example')
+        self.view['lane'] = 'ci-' + 'e' * 12
+        self.assertEqual(control.context(self.root, self.view, 'example'), ('example', self.job))
+        self.assertRaises(ValueError, control.settle, self.root, self.view, 'example')
+        self.assertRaises(ValueError, control.results.spec, self.spec['params'], 'a' * 40)
+        self.assertRaises(ValueError, control.results.spec, self.spec['params'] | dict(revision=1), 1)
 
     def test_cancel_never_targets_another_project_or_confirms_failed_cleanup(self):
         self.queue.job.return_value = self.view
         argv = ['control.py', str(self.root), 'other', 'cancel', ID]
-        with patch.dict(control.os.environ), patch('sys.argv', argv), self.assertRaises(ValueError):
+        with patch('sys.argv', argv), self.assertRaises(ValueError):
             control.main()
         self.queue.cancel.assert_not_called()
         self.view['state'] = 'FAILED'
         self.queue.wait.return_value = self.view
         argv[2] = 'example'
-        with patch.dict(control.os.environ), patch('sys.argv', argv), patch.object(control, 'settle'), self.assertRaisesRegex(ValueError, 'unconfirmed'):
+        with patch('sys.argv', argv), self.assertRaisesRegex(ValueError, 'unconfirmed'):
             control.main()
         self.queue.cancel.assert_not_called()
 

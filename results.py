@@ -32,7 +32,7 @@ def arguments(value):
 def spec(params, revision, project=None):
     if (not isinstance(params, dict) or set(params) != {'project', 'revision', 'job'}
             or not isinstance(params['project'], str) or len(params['project']) > 65536 or not re.fullmatch(r'[A-Za-z0-9_-]+', params['project'])
-            or params['revision'] != revision or not re.fullmatch(r'[0-9a-f]{40}', revision)
+            or not isinstance(revision, str) or params['revision'] != revision or not re.fullmatch(r'[0-9a-f]{40}', revision)
             or project is not None and params['project'] != project):
         raise ValueError('canonical job project or reviewed revision differs')
     try:
