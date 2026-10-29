@@ -48,6 +48,8 @@ class Enrollment(unittest.TestCase):
         shutil.copyfile(Path(enroll.__file__).with_name('install.sh'), self.root / 'bin/install.sh')
         self.runtime()
         record = dict(name='existing', host='local', kind='owned', online=True)
+        # Unit jobs may be UID 0 inside a rootless container; simulate the host prerequisite.
+        self.script(self.root / 'tools/id', 'test "$1" = -u\nprintf "1000\\n"\n')
         self.script(self.root / 'tools/tailworker', 'printf "%s\\n" ' + shlex.quote(json.dumps(record)) + '\n')
         info = dict(dispatcher='100.64.0.1:7300', cas='http://100.64.0.1:7301',
                     kit=str(self.root / 'kit'), runner=str(self.root / 'runner'), node='coordinator', signer='false')
