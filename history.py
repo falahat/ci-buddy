@@ -6,22 +6,17 @@ import sqlite3
 import statistics
 import subprocess
 import time
-import xml.etree.ElementTree as ET
+from contextlib import closing
 
 HISTORY_LIMIT = 16 * 1024 * 1024
-
-
-class JUnit(ET.TreeBuilder):
-    def doctype(self, name, pubid, system):
-        raise ValueError('JUnit must not declare a DTD')
 
 
 def db(folder):
     connection = sqlite3.connect(Path(folder) / "history.sqlite")
     connection.row_factory = sqlite3.Row
     connection.executescript('''PRAGMA journal_mode=WAL;
-        CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY, kind, key, tree, "commit", branch, submitter,
-            slot, argv, queued_at, started_at, ended_at, exit, cpu_s, peak_bytes, reused_from);
+        CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, kind, key, tree, "commit", branch, submitter,
+            slot, argv, queued_at, started_at, ended_at, exit, cpu_s, peak_bytes);
         CREATE TABLE IF NOT EXISTS tests(id INTEGER PRIMARY KEY, name UNIQUE);
         CREATE TABLE IF NOT EXISTS results(test, run, status, ms, excerpt,
             PRIMARY KEY(test, run)) WITHOUT ROWID;
@@ -38,9 +33,6 @@ def store(folder, values, results=()):
     with connection:
         columns = ','.join('"' + key + '"' for key in values)
         connection.execute(f'INSERT OR REPLACE INTO runs({columns}) VALUES({",".join("?" for _ in values)})', tuple(values.values()))
-        if values.get('reused_from') is not None:
-            connection.execute('INSERT OR REPLACE INTO results SELECT test,?,status,ms,excerpt FROM results WHERE run=?',
-                               (values['id'], values['reused_from']))
         for name, status, ms, excerpt in results:
             connection.execute('INSERT OR IGNORE INTO tests(name) VALUES(?)', (name,))
             connection.execute('INSERT OR REPLACE INTO results VALUES((SELECT id FROM tests WHERE name=?),?,?,?,?)',
@@ -48,88 +40,28 @@ def store(folder, values, results=()):
     connection.close()
 
 
-def record(folder, out, read_file):
-    out = Path(out)
-    job = json.loads(read_file(out / "job.json"))
-    results, total, xml_bytes = {}, 0, 0
-    def add(name, status, ms, excerpt):
-        nonlocal total
-        if (not isinstance(name, str) or not name or len(name.encode()) > 4096 or '\0' in name
-                or status not in ('passed', 'failed', 'skipped')
-                or type(ms) not in (int, float) or not math.isfinite(ms) or ms < 0
-                or excerpt is not None and (not isinstance(excerpt, str) or len(excerpt.encode()) > 4096)
-                or name.startswith('phase/') and Path(name[6:]).name != name[6:]):
-            raise ValueError('invalid test or phase result')
-        size = len(json.dumps([name, status, ms, excerpt]).encode())
-        total += size - (results[name][1] if name in results else 0)
-        results[name] = ((status, ms, excerpt), size)
-        if len(results) > 100000 or total > HISTORY_LIMIT:
-            raise ValueError('test result count or byte limit exceeded')
-    for path in out.rglob("junit.xml"):
-        text = read_file(path, HISTORY_LIMIT + 1)
-        xml_bytes += len(text.encode())
-        if xml_bytes > HISTORY_LIMIT:
-            raise ValueError('JUnit XML exceeds byte limit')
-        for suite in ET.fromstring(text, parser=ET.XMLParser(target=JUnit())).iter("testsuite"):
-            for case in suite.findall("testcase"):
-                failed = [node for node in case if node.tag in ("failure", "error")]
-                status = "failed" if failed else "skipped" if case.find("skipped") is not None else "passed"
-                seconds = float(case.attrib["time"])
-                if not math.isfinite(seconds) or seconds < 0:
-                    raise ValueError("invalid JUnit duration")
-                text = "\n".join(node.get("message", "") + "\n" + "".join(node.itertext())
-                    for node in [*failed, *case.findall("system-err"), *case.findall("system-out")]) if failed else None
-                add(case.attrib["classname"] + "::" + case.attrib["name"], status,
-                    round(seconds * 1000),
-                    text.encode()[:4096].decode(errors="ignore") if text is not None else None)
-    for prefix in ("", "bench_"):
-        if prefix and prefix + "ended_at" not in job:
-            continue
-        started, ended = job.get(prefix + "started_at"), job.get(prefix + "ended_at")
-        status = job.get(prefix + "exit")
-        label = "bench" if prefix or job["kind"] == "bench" else "correctness"
-        if started is not None and ended is not None:
-            add("phase/" + label, "passed" if status == 0 else "failed", (ended - started) * 1000,
-                None if status == 0 else f"{label} exited {status}")
-        if prefix and started is not None:
-            add("phase/bench-wait", "passed", (started - job["bench_queued_at"]) * 1000, None)
-        try:
-            text = read_file(out / (prefix.replace("_", "-") + "phases.tsv"), HISTORY_LIMIT + 1)
-            if len(text.encode()) > HISTORY_LIMIT:
-                raise ValueError('phase results exceed byte limit')
-            lines = text.splitlines()
-        except FileNotFoundError:
-            lines = []
-        for line in lines:
-            name, seconds, status = line.split("\t")
-            if not math.isfinite(float(seconds)) or float(seconds) < 0:
-                raise ValueError("invalid phase duration")
-            if Path(name).name != name:
-                raise ValueError("phase name must be a filename")
-            excerpt = None
-            if int(status) != 0:
-                try:
-                    excerpt = read_file(out / (name + ".log")).encode()[-4096:].decode(errors="ignore")
-                except FileNotFoundError:
-                    excerpt = f"{name} exited {status}"
-            add("phase/" + name, "passed" if int(status) == 0 else "failed", float(seconds) * 1000, excerpt)
-    values = {key: job.get(key) for key in ("kind", "key", "tree", "commit", "branch", "submitter",
-        "queued_at", "started_at", "ended_at", "exit", "cpu_s", "peak_bytes", "reused_from")}
-    if values["exit"] is None:
-        values["exit"] = int(read_file(out / "exit"))
-    values["exit"] = job.get("overall_exit", values["exit"])
-    values["ended_at"] = job.get("bench_ended_at", values["ended_at"])
-    try:
-        slot = read_file(out / "slot")
-        values["slot"] = int(slot) if slot else None
-    except FileNotFoundError:
-        values["slot"] = None
-    if "bench_ended_at" in job:
-        for name, combine in (("cpu_s", sum), ("peak_bytes", max)):
-            pair = [job.get(name), job.get("bench_" + name)]
-            values[name] = combine(pair) if None not in pair else None
-    values.update(id=int(out.name), argv=json.dumps(job["argv"]))
-    store(folder, values, ((name, *value[0]) for name, value in results.items()))
+def reuse(folder, key):
+    with closing(db(folder)) as connection:
+        row = connection.execute('SELECT * FROM runs WHERE key=? AND exit IS NOT NULL ORDER BY ended_at DESC LIMIT 1', (key,)).fetchone()
+        return dict(row) if row else None
+
+
+def run(folder, identifier):
+    with closing(db(folder)) as connection:
+        row = connection.execute('SELECT * FROM runs WHERE id=?', (identifier,)).fetchone()
+        return dict(row) if row else None
+
+
+def record(folder, identifier, job, result):
+    steps = result['steps']
+    values = {key: job.get(key) for key in ('kind', 'key', 'tree', 'commit', 'branch', 'submitter', 'queued_at')}
+    values.update(id=identifier, argv=json.dumps(job['argv']), slot=result['slot'], exit=result['exit'],
+                  started_at=steps[0].get('started_at') if steps else None,
+                  ended_at=steps[-1]['ended_at'] if steps else None)
+    for field, combine in (('cpu_s', sum), ('peak_bytes', max)):
+        numbers = [step.get(field) for step in steps]
+        values[field] = combine(numbers) if numbers and None not in numbers else None
+    store(folder, values, result['tests'])
 
 
 def query(folder, argv):
@@ -148,7 +80,7 @@ def query(folder, argv):
 
     connection.create_aggregate("median", 1, Median)
     join = ' FROM results s JOIN tests t ON t.id=s.test JOIN runs r ON r.id=s.run '
-    where, parameters = "r.reused_from IS NULL", []
+    where, parameters = "1", []
     if command == "test":
         where += " AND t.name=?"
         parameters = args
@@ -198,13 +130,13 @@ def query(folder, argv):
     else:
         answer = select('''SELECT strftime('%Y-%m-%d',ended_at,'unixepoch') AS day,COUNT(*) AS gates,
             MIN(started_at) AS first_started_at,MAX(ended_at) AS last_ended_at,
-            median(correctness+bench) AS total_s,MAX(correctness+bench) AS max_total_s,
+            median(correctness+COALESCE(bench,0)) AS total_s,MAX(correctness+COALESCE(bench,0)) AS max_total_s,
             median(started_at-queued_at) AS queue_s,median(correctness) AS correctness_s,
             median(bench_wait) AS bench_wait_s,median(bench) AS bench_s
             FROM (SELECT r.id,r.ended_at,r.started_at,r.queued_at,
             MAX(CASE WHEN t.name='phase/correctness' THEN s.ms/1000 END) AS correctness,
-            MAX(CASE WHEN t.name='phase/bench-wait' THEN s.ms/1000 END) AS bench_wait,
-            MAX(CASE WHEN t.name='phase/bench' THEN s.ms/1000 END) AS bench
+            MAX(CASE WHEN t.name='phase/profiling-wait' THEN s.ms/1000 END) AS bench_wait,
+            MAX(CASE WHEN t.name='phase/profiling' THEN s.ms/1000 END) AS bench
             FROM runs r LEFT JOIN results s ON r.id=s.run LEFT JOIN tests t ON t.id=s.test WHERE ''' + where + ' GROUP BY r.id) GROUP BY day ORDER BY day')
     connection.close()
     print(json.dumps(dict(answer=answer, query_s=time.perf_counter() - started, host_load=os.getloadavg())))

@@ -1,12 +1,13 @@
-"""Bounded native CAS artifacts with coordinator-owned identity and history."""
+"""Validate raw artifacts once on the worker; store bounded summaries centrally."""
 import json
 import math
-from pathlib import Path, PurePosixPath
-import shutil
+import os
+from pathlib import Path
+import re
+import stat
 import subprocess
-import tarfile
 import tempfile
-import time
+import xml.etree.ElementTree as ET
 
 import data
 import history
@@ -15,6 +16,31 @@ import safe_output
 OUTPUT_LIMIT = 128 * 1024 * 1024
 ARCHIVE_LIMIT = 512 * 1024 * 1024
 HISTORY_LIMIT = history.HISTORY_LIMIT
+FILE_LIMIT = 4096
+TEST_LIMIT = 100000
+PLAN = ('name', 'kind', 'exclusive', 'argv')
+TIMING = ('queued_at', 'started_at', 'ended_at', 'cpu_s', 'peak_bytes', 'cap_killed')
+
+
+class JUnit(ET.TreeBuilder):
+    def doctype(self, name, pubid, system):
+        raise ValueError('JUnit must not declare a DTD')
+
+
+class Tests(dict):
+    total = 0
+    def add(self, name, status, ms, excerpt):
+        if (not isinstance(name, str) or not name or len(name.encode()) > 4096 or '\0' in name
+                or status not in ('passed', 'failed', 'skipped')
+                or type(ms) not in (int, float) or not math.isfinite(ms) or ms < 0
+                or excerpt is not None and (not isinstance(excerpt, str) or len(excerpt.encode()) > 4096)
+                or name.startswith('phase/') and Path(name[6:]).name != name[6:]):
+            raise ValueError('invalid test or phase result')
+        row = [name, status, ms, excerpt]
+        self.total += len(json.dumps(row).encode()) - (len(json.dumps(self[name]).encode()) if name in self else 0)
+        self[name] = row
+        if len(self) > TEST_LIMIT or self.total > HISTORY_LIMIT:
+            raise ValueError('test result count or byte limit exceeded')
 
 
 def cas(root, operation, *arguments, limit=None):
@@ -25,122 +51,211 @@ def cas(root, operation, *arguments, limit=None):
     return subprocess.check_output(command + [operation, *map(str, arguments)], text=True).strip()
 
 
-def unpack_results(archive_path, destination):
-    allowed = {'report.txt', 'phases.tsv', 'metadata.json', 'runner.log',
-               'stats', 'fetch-stats', 'prepare-stats', 'job.json', 'slot', 'bench-phases.tsv',
-               'bench-stats', 'bench-fetch-stats', 'bench-prepare-stats', 'bench-runner.log'}
-    seen, total = set(), 0
-    with tarfile.open(archive_path, 'r:') as archive:
-        for entry in archive:
-            name = PurePosixPath(entry.name)
-            total += entry.size
-            if (not entry.isfile() or entry.issparse() or entry.mode & 0o111
-                    or not name.parts or name.is_absolute() or '..' in name.parts
-                    or name.as_posix() != entry.name or '\\' in entry.name
-                    or not entry.name.isprintable() or ':' in name.parts[0]
-                    or entry.name in seen or len(entry.name) > 4096
-                    or entry.size < 0 or entry.size > OUTPUT_LIMIT
-                    or total > ARCHIVE_LIMIT or len(seen) >= 4096):
-                raise ValueError('unsafe worker archive entry')
-            seen.add(entry.name)
-            junit = len(name.parts) == 3 and name.parts[0] == 'junit' and name.parts[-1] == 'junit.xml'
-            log = len(name.parts) == 1 and name.suffix == '.log'
-            if entry.name not in allowed and not junit and not log:
+def artifact_path(root, path):
+    relative = path.relative_to(root)
+    name = relative.as_posix()
+    if (not relative.parts or '..' in relative.parts or '\\' in name or not name.isprintable()
+            or len(name) > 4096 or ':' in relative.parts[0]
+            or any(not stat.S_ISDIR(parent.lstat().st_mode) for parent in path.parents if parent != root and parent.is_relative_to(root))):
+        raise ValueError('unsafe raw artifact path')
+
+
+def raw(root, path, limit=HISTORY_LIMIT, tail=False):
+    artifact_path(root, path)
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o111 or info.st_nlink != 1 or info.st_size > limit:
+            raise ValueError('unsafe raw artifact type or size')
+        if tail:
+            stream.seek(max(0, info.st_size - 4096))
+        block = stream.read(4096 if tail else limit + 1)
+        if len(block) > limit:
+            raise ValueError('raw artifact exceeds byte limit')
+        return block.decode(errors='ignore' if tail else 'strict')
+
+
+def validate(value, job, identifier, status):
+    if (not isinstance(value, dict) or set(value) != {'job_id', 'commit', 'base', 'tree', 'slot', 'steps', 'exit', 'tests', 'report'}
+            or value['job_id'] != identifier or not re.fullmatch(r'j_[0-9A-HJKMNP-TV-Z]{26}', identifier)
+            or any(value[key] != job[key] for key in ('commit', 'base', 'tree'))
+            or type(status) is not int or not 0 <= status <= 255 or type(value['exit']) is not int or value['exit'] != status
+            or value['slot'] is not None and (type(value['slot']) is not int or value['slot'] < 1)
+            or not isinstance(value['report'], str) or len(value['report'].encode()) > HISTORY_LIMIT
+            or not isinstance(value['steps'], list) or not 0 < len(value['steps']) <= len(job['steps'])
+            or not isinstance(value['tests'], list)):
+        raise ValueError('normalized result identity, shape or size differs')
+    previous = job['queued_at']
+    for index, step in enumerate(value['steps']):
+        if (not isinstance(step, dict) or set(step) != set(PLAN + TIMING + ('exit', 'phases'))
+                or any(type(step[key]) is not type(job['steps'][index][key]) or step[key] != job['steps'][index][key] for key in PLAN)
+                or type(step['exit']) is not int or not 0 <= step['exit'] <= 255
+                or not isinstance(step['phases'], list) or len(step['phases']) > 4096):
+            raise ValueError('normalized step differs from canonical plan')
+        for field in TIMING:
+            number = step[field]
+            if number is not None and (type(number) not in (int, float) or not math.isfinite(number) or number < 0):
+                raise ValueError('invalid step accounting')
+        if (step['queued_at'] is None or step['ended_at'] is None or not previous <= step['queued_at'] <= step['ended_at']
+                or step['started_at'] is not None and not step['queued_at'] <= step['started_at'] <= step['ended_at']
+                or any(step[field] is not None and type(step[field]) is not int for field in ('peak_bytes', 'cap_killed'))
+                or index and value['steps'][index - 1]['exit'] != 0):
+            raise ValueError('invalid step order or timestamps')
+        phase_at = step['started_at'] if step['started_at'] is not None else step['queued_at']
+        for name, when in step['phases']:
+            if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', name)
+                    or type(when) not in (int, float) or not math.isfinite(when) or not phase_at <= when <= step['ended_at']):
+                raise ValueError('invalid step phase')
+            phase_at = when
+        previous = step['ended_at']
+    if status != 137 and (status != value['steps'][-1]['exit'] or status == 0 and len(value['steps']) != len(job['steps'])):
+        raise ValueError('aggregate exit differs from completed steps')
+    tests = Tests()
+    for row in value['tests']:
+        if not isinstance(row, list) or len(row) != 4:
+            raise ValueError('invalid normalized test row')
+        tests.add(*row)
+    if len(tests) != len(value['tests']) or len(json.dumps(value).encode()) > HISTORY_LIMIT:
+        raise ValueError('duplicate or oversized normalized results')
+    return value
+
+
+def normalize(artifacts, job, identifier, slot):
+    tests, xml_bytes, total, count = Tests(), 0, 0, 0
+    steps, report = [], ['host_load=' + str(os.getloadavg()) + '\n']
+    for path in artifacts.rglob('*'):
+        info = path.lstat()
+        if stat.S_ISREG(info.st_mode) and not info.st_mode & 0o111:
+            artifact_path(artifacts, path)
+            total += info.st_size
+            count += 1
+            if info.st_size > OUTPUT_LIMIT or total > ARCHIVE_LIMIT or count > FILE_LIMIT:
+                raise ValueError('raw artifact count or byte limit exceeded')
+    for planned in job['steps']:
+        if 'exit' not in planned:
+            break
+        name = planned['name']
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', name):
+            raise ValueError('invalid step name')
+        out = artifacts / 'steps' / name
+        step = {key: planned[key] for key in PLAN}
+        step.update({key: planned.get(key) for key in TIMING + ('exit',)})
+        step['phases'] = planned.get('phases', [])
+        totals = []
+        for field in ('fetch-stats', 'prepare-stats', 'stats'):
+            try:
+                numbers = dict(line.replace('=', ' ').split() for line in raw(artifacts, out / field).splitlines())
+            except FileNotFoundError:
                 continue
-            if (junit or entry.name in ('report.txt', 'job.json', 'phases.tsv', 'bench-phases.tsv')) and entry.size > HISTORY_LIMIT:
-                raise ValueError('worker metadata exceeds size limit')
-            path = destination.joinpath(*name.parts)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open('xb') as output:
-                shutil.copyfileobj(archive.extractfile(entry), output)
+            numbers = {key: int(numbers[key]) for key in ('usage_usec', 'memory_peak_bytes', 'oom_kill')}
+            if any(number < 0 for number in numbers.values()):
+                raise ValueError('negative cgroup accounting')
+            totals.append(numbers)
+        complete = len(totals) == (3 if any(phase == 'prepare' for phase, _ in step['phases']) else 2)
+        step.update(cpu_s=sum(row['usage_usec'] for row in totals) / 1000000 if complete else None,
+                    peak_bytes=max(row['memory_peak_bytes'] for row in totals) if complete else None,
+                    cap_killed=sum(row['oom_kill'] for row in totals) if complete else None)
+        steps.append(step)
+        started, ended = step['started_at'], step['ended_at']
+        if started is not None:
+            tests.add('phase/' + name, 'passed' if step['exit'] == 0 else 'failed', (ended - started) * 1000,
+                      None if step['exit'] == 0 else f"{name} exited {step['exit']}")
+            if name == 'profiling':
+                tests.add('phase/profiling-wait', 'passed', (started - step['queued_at']) * 1000, None)
+            report.append(f"{name} queue_s={started - step['queued_at']:.3f} run_s={ended - started:.3f} exit={step['exit']} cpu_s={step['cpu_s']} peak_bytes={step['peak_bytes']} cap_killed={step['cap_killed']} scope=fetch+prepare+run peak_includes_file_cache=true\n")
+            points = step['phases'] + [['end', ended]]
+            for (phase, begin), (_, end) in zip(points, points[1:]):
+                report.append(f'{name}.{phase}_s={end - begin:.3f}\n')
+            residual = ended - started - sum(end[1] - begin[1] for begin, end in zip(points, points[1:]))
+            report.append(f'{name} unaccounted_s={residual:.3f}\n')
+        else:
+            report.append(name + ' ended before start; stats incomplete\n')
+        if not complete:
+            report.append(name + ' stats incomplete\n')
+        for path in out.rglob('junit.xml'):
+            text = raw(artifacts, path)
+            xml_bytes += len(text.encode())
+            if xml_bytes > HISTORY_LIMIT:
+                raise ValueError('JUnit XML exceeds byte limit')
+            for suite in ET.fromstring(text, parser=ET.XMLParser(target=JUnit())).iter('testsuite'):
+                for case in suite.findall('testcase'):
+                    failed = [node for node in case if node.tag in ('failure', 'error')]
+                    status = 'failed' if failed else 'skipped' if case.find('skipped') is not None else 'passed'
+                    seconds = float(case.attrib['time'])
+                    if not math.isfinite(seconds) or seconds < 0:
+                        raise ValueError('invalid JUnit duration')
+                    text = '\n'.join(node.get('message', '') + '\n' + ''.join(node.itertext())
+                        for node in [*failed, *case.findall('system-err'), *case.findall('system-out')]) if failed else None
+                    tests.add(case.attrib['classname'] + '::' + case.attrib['name'], status, round(seconds * 1000),
+                              text.encode()[:4096].decode(errors='ignore') if text is not None else None)
+    if job['kind'] == 'test':
+        counts = []
+        for filename in ('all-tests.json', 'selected-tests.json'):
+            try:
+                listing = json.loads(raw(artifacts, artifacts / 'out' / filename))
+            except FileNotFoundError:
+                if job['exit'] == 0:
+                    raise
+                report.append('test selection incomplete\n')
+                break
+            if not isinstance(listing, dict) or not isinstance(listing['rust-suites'], dict):
+                raise ValueError('invalid nextest listing')
+            runnable, total = 0, 0
+            for suite in listing['rust-suites'].values():
+                if not isinstance(suite, dict) or not isinstance(suite['testcases'], dict):
+                    raise ValueError('invalid nextest suite')
+                for case in suite['testcases'].values():
+                    total += 1
+                    if (not isinstance(case, dict) or type(case['ignored']) is not bool
+                            or not isinstance(case['filter-match'], dict) or case['filter-match']['status'] not in ('matches', 'mismatch')
+                            or total > TEST_LIMIT):
+                        raise ValueError('invalid nextest case or count')
+                    runnable += not case['ignored'] and case['filter-match']['status'] == 'matches'
+            counts.append(runnable)
+        if len(counts) == 2:
+            if counts[1] > counts[0]:
+                raise ValueError('selected count exceeds all runnable tests')
+            report.append(f"touched_packages={job['touched_packages']} selection={job['selection']} selected={counts[1]} total={counts[0]} scope=runnable\n")
+    for filename in ('phases.tsv', 'report.txt'):
+        try:
+            text = raw(artifacts, artifacts / 'out' / filename)
+        except FileNotFoundError:
+            continue
+        if filename == 'report.txt':
+            report.append(safe_output.clean(text))
+            continue
+        for line in text.splitlines():
+            name, seconds, status = line.split('\t')
+            if Path(name).name != name or not 0 <= int(status) <= 255:
+                raise ValueError('invalid phase name or status')
+            try:
+                excerpt = raw(artifacts, artifacts / 'out' / (name + '.log'), OUTPUT_LIMIT, tail=True) if int(status) else None
+            except FileNotFoundError:
+                excerpt = f'{name} exited {status}'
+            tests.add('phase/' + name, 'passed' if int(status) == 0 else 'failed', float(seconds) * 1000, excerpt)
+    result = dict(job_id=identifier, slot=slot, steps=steps, exit=job['exit'], tests=list(tests.values()), report=''.join(report))
+    result.update({key: job[key] for key in ('commit', 'base', 'tree')})
+    return validate(result, job, identifier, job['exit'])
 
 
-def accounting(payload, slot, status, bench_required=False):
-    if (not isinstance(payload, dict) or type(status) is not int or not 0 <= status <= 255
-            or type(payload.get('overall_exit')) is not int or payload['overall_exit'] != status
-            or slot is not None and (type(slot) is not int or slot < 1)):
-        raise ValueError('worker exit differs from transport')
-    bench = 'bench_exit' in payload
-    if (bench and (not bench_required or payload.get('exit') != 0)
-            or bench_required and payload.get('exit') == 0 and not bench and status != 137):
-        raise ValueError('worker profiling phase differs from canonical job')
-    result = dict(overall_exit=status)
-    for prefix in ('', 'bench_') if bench else ('',):
-        values = {key: payload.get(prefix + key) for key in ('queued_at', 'started_at', 'ended_at', 'cpu_s', 'peak_bytes', 'exit')}
-        for value in values.values():
-            if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
-                raise ValueError('invalid worker accounting')
-        if (type(values['exit']) is not int or not 0 <= values['exit'] <= 255
-                or values['queued_at'] is None or values['ended_at'] is None
-                or values['queued_at'] > values['ended_at']
-                or values['started_at'] is not None and not values['queued_at'] <= values['started_at'] <= values['ended_at']
-                or values['peak_bytes'] is not None and type(values['peak_bytes']) is not int
-                or prefix and values['queued_at'] < payload['ended_at']):
-            raise ValueError('invalid worker timestamps or slot')
-        if not prefix:
-            del values['queued_at']
-        result.update({prefix + key: value for key, value in values.items()})
-    if status != 137 and status != result['bench_exit' if bench else 'exit']:
-        raise ValueError('worker aggregate exit differs from phase exits')
-    return result
-
-
-def collect(root, project, identifier, action, cancelled=False):
+def collect(root, project, identifier, action, job):
+    outputs, status = action['outputs'], action['metrics']['exit']
+    for name, limit in (('results', HISTORY_LIMIT), ('logs', OUTPUT_LIMIT)):
+        output = outputs[name]
+        if (type(output['size']) is not int or not 0 <= output['size'] <= limit
+                or not isinstance(output['address'], str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', output['address'])):
+            raise ValueError('invalid native output size or address')
+    with tempfile.TemporaryDirectory(dir=root / 'containers') as directory:
+        path = Path(directory) / 'result.json'
+        cas(root, 'get', outputs['results']['address'], path, limit=HISTORY_LIMIT)
+        if path.stat().st_size != outputs['results']['size']:
+            raise ValueError('normalized result size differs')
+        result = validate(json.loads(data.read_file(path)), job, identifier, status)
     folder = root / 'projects' / project
     out = folder / 'runs' / identifier
-    output = action['outputs']['run']
-    status = action['metrics']['exit']
-    if (type(output['size']) is not int or not 0 <= output['size'] <= OUTPUT_LIMIT
-            or type(status) is not int or not 0 <= status <= 255):
-        raise ValueError('invalid native archive size or exit metric')
-    with tempfile.TemporaryDirectory(dir=root / 'containers') as temporary:
-        temporary = Path(temporary)
-        compressed, decoded = temporary / 'run.tar.zst', temporary / 'run.tar'
-        cas(root, 'get', output['address'], compressed, limit=OUTPUT_LIMIT)
-        if compressed.stat().st_size != output['size']:
-            raise ValueError('worker archive size differs')
-        with decoded.open('xb') as destination, subprocess.Popen(
-                ['zstd', '-dq', '--memory=128MB', '-c', str(compressed)], stdout=subprocess.PIPE) as process:
-            total = 0
-            try:
-                while block := process.stdout.read1(min(65536, ARCHIVE_LIMIT - total + 1)):
-                    total += len(block)
-                    if total > ARCHIVE_LIMIT:
-                        raise ValueError('worker archive expands beyond size limit')
-                    destination.write(block)
-            except BaseException:
-                process.terminate()
-                raise
-            if process.wait():
-                raise ValueError('worker archive decoding failed')
-        returned = temporary / identifier
-        returned.mkdir()
-        unpack_results(decoded, returned)
-        slot_text = data.read_file(returned / 'slot').strip()
-        slot = int(slot_text) if slot_text else None
-        job = json.loads(data.read_file(out / 'job.json'))
-        values = accounting(json.loads(data.read_file(returned / 'job.json')), slot, status, job.get('bench_required', False))
-        values['overall_exit'] = 137 if cancelled else status
-        job.update(values)
-        job['node'] = action['runner']['node']
-        data.write_file(returned / 'job.json', json.dumps(job))
-        data.write_file(returned / 'slot', '' if slot is None else str(slot))
-        history.record(folder, returned, data.read_file)
-        for path in returned.iterdir():
-            if path.name in ('job.json', 'slot', 'runner.log'):
-                continue
-            target = out / path.name
-            if target.is_dir():
-                shutil.rmtree(target)
-            path.replace(target)
-        data.write_file(out / 'job.json', json.dumps(job))
-        data.write_file(out / 'slot', '' if slot is None else str(slot))
-        report = out / 'report.txt'
-        text = safe_output.clean(data.read_file(report)) if report.exists() else ''
-        data.write_file(report, text + ('owner cancellation: exit=137\n' if cancelled else ''))
-        saved = folder / 'logs' / time.strftime('%Y-%m') / (identifier + '.tar.zst')
-        saved.parent.mkdir(parents=True, exist_ok=True)
-        compressed.replace(saved)
-        for path in out.rglob('junit.xml'):
-            path.unlink()
-    return 137 if cancelled else status
+    out.mkdir(mode=0o700, parents=True, exist_ok=True)
+    saved = dict(job, steps=[dict(plan, **step) for plan, step in zip(job['steps'], result['steps'])],
+                 exit=result['exit'], slot=result['slot'], node=action['runner']['node'], logs=outputs['logs'])
+    history.record(folder, identifier, job, result)
+    data.write_file(out / 'job.json', json.dumps(saved))
+    data.write_file(out / 'report.txt', safe_output.clean(result['report']))
+    return result['exit']
