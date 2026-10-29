@@ -47,7 +47,8 @@ def rpc(endpoint, mode, token=b''):
     host, root = ssh.endpoint(endpoint)
     command = ['python3', str(PurePosixPath(root, 'bin', 'auth.py')), mode]
     argv = [sys.executable, str(Path(root) / 'bin/auth.py'), mode] if host == 'local' else ssh.command(host, shlex.join(command))
-    return ssh.capture(argv, 512, payload=token)
+    # Enrollment has no output protocol; discard diagnostics rather than buffer secrets.
+    subprocess.run(argv, input=token, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
 def distribute(token, endpoints, mode, announce=False):
@@ -73,6 +74,8 @@ def client(arguments):
     if arguments:
         raise ValueError('auth takes no destinations; configure the approved host pool first')
     endpoints = subprocess.check_output(['git', 'config', '--global', '--get-all', 'ci-buddy.host']).decode().splitlines()
+    if len(endpoints) != 1:
+        raise ValueError('configure exactly one approved coordinator')
     warnings.simplefilter('error', getpass.GetPassWarning)
     token = validate(getpass.getpass('GitHub token (selected repositories, Contents: read-only): ').encode())
     distribute(token, endpoints, 'install', announce=True)

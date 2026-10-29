@@ -8,7 +8,6 @@ import socket
 import stat
 import subprocess
 import sys
-import tempfile
 
 
 OPTIONS = ['-q', '-T', '-x', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
@@ -88,32 +87,6 @@ def command(destination, remote):
     user = ['-l', config['user']] if 'user' in config else []
     return ['ssh', *selected, *OPTIONS, '-p', str(port), *user, '-o', 'HostName=' + address, '-o', 'HostKeyAlias=' + alias,
             *identities, destination, remote]
-
-
-def capture(command, limit=4096, payload=None):
-    if type(limit) is not int or limit < 0:
-        raise ValueError('RPC output limit must be a nonnegative integer')
-    # File-backed input cannot deadlock against a child's full stdout pipe.
-    with tempfile.TemporaryFile() as source:
-        if isinstance(payload, bytes):
-            source.write(payload)
-            source.seek(0)
-            payload = source
-        with subprocess.Popen(command, stdin=payload, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT) as process:
-            try:
-                output = process.stdout.read(limit + 1)
-                if len(output) > limit:
-                    raise ValueError('RPC output exceeds size limit')
-                status = process.wait()
-                if status:
-                    raise subprocess.CalledProcessError(status, command)
-                return output
-            except BaseException:
-                if process.poll() is None:
-                    process.terminate()
-                process.wait()
-                raise
 
 
 if __name__ == '__main__':
