@@ -58,8 +58,8 @@ class Enrollment(unittest.TestCase):
         events = shlex.quote(str(self.root / 'events'))
         self.script(self.root / 'kit/install-command.sh', 'test "$1" = --env\ncp "$2" ' +
                     shlex.quote(str(self.root / 'profiles')) + '/"$(basename "$2")"\nprintf "installed\\n" >>' + events + '\n')
-        self.script(self.root / 'kit/enroll-command.sh', 'grep -F ' + shlex.quote(self.endpoint) + ' ' +
-                    shlex.quote(str(self.root / 'host.conf')) + ' >/dev/null\nprintf "start\\n" >>' + events +
+        self.script(self.root / 'kit/enroll-command.sh', 'grep -Fq ' + shlex.quote(self.endpoint) + ' ' +
+                    shlex.quote(str(self.root / 'host.conf')) + '\nprintf "start\\n" >>' + events +
                     '\ntest ! -e ' + shlex.quote(str(self.root / 'fail-start')) + '\n')
         self.enterContext(patch.dict(os.environ, PATH=str(self.root / 'tools') + os.pathsep + os.environ['PATH']))
         self.enterContext(patch.object(enroll.auth, 'read', return_value=b'fixture-token'))

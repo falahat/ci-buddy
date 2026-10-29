@@ -90,7 +90,7 @@ def container(role, image, options):
         '\n[Service]\nRestart=on-failure\nTimeoutStopSec=infinity\n[Install]\nWantedBy=default.target\n')
 container('dispatch', dispatcher, f'Volume={root}/dispatch:/work/plane\nExec=-config /work/plane/plane.toml\n')
 container('cas', cas, f'Volume={root}/dispatch/cas:/work/cas\nExec=--dir=/work/cas --max_size=64 --http_address=127.0.0.1:8080\n')
-container('pep', auth, f'Volume={root}/dispatch/pep:/work/pep\nEnvironment=PEP_ROOT_PUBKEY={pubkey}\n'
+container('pep', auth, f'Entrypoint=pep\nVolume={root}/dispatch/pep:/work/pep\nEnvironment=PEP_ROOT_PUBKEY={pubkey}\n'
     f'Environment=PEP_RUNNER_LISTEN=0.0.0.0:{port}\nEnvironment=PEP_DISPATCHER_ADDR=127.0.0.1:7700\n'
     f'Environment=PEP_CAS_LISTEN=0.0.0.0:{cas_port}\nEnvironment=PEP_CAS_BACKEND=http://127.0.0.1:8080\n'
     'Environment=PEP_CAS_STYLE=bazel\nEnvironment=PEP_NONCE_DB=/work/pep/nonces.redb\nEnvironment=PEP_REVOCATION_DB=/work/pep/revocations.json\n')
