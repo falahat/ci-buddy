@@ -116,7 +116,7 @@ def collect(root, project, identifier, action, phase, cancelled=False):
         data.write_file(returned / 'slot', '' if slot is None else str(slot))
         job['junit_ingested_at'] = history.record(folder, returned, data.read_file)
         for path in returned.iterdir():
-            if path.name in ('job.json', 'slot'):
+            if path.name in ('job.json', 'slot', 'runner.log'):
                 continue
             target = out / path.name
             if target.is_dir():

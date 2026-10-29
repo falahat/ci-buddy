@@ -22,13 +22,13 @@ class Credentials(unittest.TestCase):
                                      GIT_CONFIG_NOSYSTEM='1'))
         self.token = ('github_pat_' + secrets.token_hex(40)).encode()
 
-    def host(self, name, workers=()):
+    def host(self, name, fetch_hosts=()):
         root = self.root / name
         (root / 'bin').mkdir(parents=True, mode=0o700)
         root.chmod(0o700)
         for source in ('auth.py', 'ssh.py', 'safe_output.py'):
             shutil.copyfile(Path(__file__).with_name(source), root / 'bin' / source)
-        (root / 'host.conf').write_text('workers = ' + repr(list(workers)) + '\n')
+        (root / 'host.conf').write_text('fetch_hosts = ' + repr(list(fetch_hosts)) + '\n')
         return root
 
     def test_enroll_rotate_and_provision_new_endpoint(self):
@@ -46,14 +46,19 @@ class Credentials(unittest.TestCase):
         self.assertNotIn(self.token, (self.root / 'owner.gitconfig').read_bytes())
         new = self.host('new')
         self.assertRaises(ValueError, auth.client, ['local:' + str(new), endpoint])
-        subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', 'local:' + str(new)], check=True)
-        auth.client(['local:' + str(new), endpoint])
+        self.assertFalse((new / 'github-token').exists())
+        (coordinator / 'host.conf').write_text('fetch_hosts = ' + repr(['local:' + str(worker), 'local:' + str(new)]) + '\n')
+        auth.install(coordinator, self.token)
         self.assertEqual(auth.read(new), self.token)
         self.token = ('github_pat_' + secrets.token_hex(40)).encode()
         with patch('getpass.getpass', return_value=self.token.decode()), contextlib.redirect_stdout(output):
             auth.client([])
-        auth.client(['local:' + str(new), endpoint])
         self.assertEqual(auth.read(new), self.token)
+        offline = 'local:' + str(self.root / 'offline')
+        (coordinator / 'host.conf').write_text('fetch_hosts = ' + repr([offline]) + '\n')
+        with self.assertRaisesRegex(ValueError, 'incomplete distribution'), contextlib.redirect_stderr(output):
+            auth.install(coordinator, self.token)
+        self.assertIn('credential unavailable: ' + offline, output.getvalue())
 
     def test_private_files_and_invalid_input(self):
         root = self.host('coordinator')

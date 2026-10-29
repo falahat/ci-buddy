@@ -5,12 +5,16 @@ A rootless Podman build-and-test tool for Rust projects, using dispatch-service'
 Install with `bash install.sh --root <directory> --dispatch-dir <reviewed-bundle>` on Linux with rootless Podman,
 cgroup v2, Git, Python 3.11+, zstd and systemd user services. Enable user lingering.
 First write `<root>/host.conf` with jobs, slots, memory, cpus (empty for uncapped),
-min_free_gb, slot_max_gb and workers (an empty array until workers are wanted).
-keep_days defaults to 90. The reviewed bundle contains dispatch-local and its
-dispatch_client Python package; installation never downloads them. The installer
+min_free_gb, slot_max_gb and fetch_hosts (an empty array until workers are enrolled).
+keep_days defaults to 90. The reviewed bundle contains the native runner, its
+dispatch_client Python package and remote-runner kit; installation never downloads them. The installer
 refuses missing configuration and selects Podman storage only if none is configured. Each root has its own
-private Unix-socket dispatch queue and systemd upkeep instances. The first links `~/.ci-buddy`; later roots
-leave that link alone. The queue service restarts on failure without retrying jobs.
+private Unix app socket and systemd upkeep instances. The first links `~/.ci-buddy`; later roots
+leave that link alone. Write owner-controlled `dispatch/plane.json` with address,
+runner_port, cas_port, dispatcher_image, auth_image and cas_image, using reviewed
+local image identities. `bash <root>/bin/plane.sh <root> init` starts the standard
+dispatcher, authenticated PEP and CAS in a rootless Podman pod, publishing only
+the PEP ports on that private address. Backend ports stay inside its namespace.
 
 Copy `example/ci-buddy.toml` to a workspace and set name, host, main, image and test.
 Optional prepare, wrapper, gate and bench commands belong to the project. Images
@@ -38,7 +42,7 @@ starts, a disconnect never causes automatic resubmission.
 A detached HEAD records an empty branch. Candidate refs disappear after checkout
 or when a job ends before checkout, including failed submissions and cancellation.
 
-A green gate runs its optional exclusive bench in the same dispatch job and output folder.
+A green gate queues its optional exclusive bench on the same worker and output folder.
 Correctness returns first. `verify` waits for both and prints their report.
 `merge` verifies clean HEAD, rejects a moved main and pushes without forcing.
 Exclusive jobs drain the machine, make data writable and allow CPU/NUMA profiling.
@@ -49,12 +53,11 @@ stay warm. Host Git metadata stays outside the writable checkout; jobs get a cop
 For private GitHub sources, create a fine-grained token for selected repositories
 with Contents read-only and an expiry, then run `ci-buddy auth`. Its hidden prompt
 accepts the token once and distributes it over pinned private SSH to approved
-hosts and their configured workers. No GitHub CLI or Secret Manager is needed.
+hosts and their enrolled fetch hosts. No GitHub CLI or Secret Manager is needed.
 The token stays in each host's owner-only root as `github-token` (0600);
-the client keeps only its SHA-256 fingerprint in owner Git configuration.
-New or previously offline hosts obtain that token from an available approved
-host before submission; workers receive it before dispatch. A lost connection
-is reported without retry. Repeat `auth` to replace an expired or revoked token.
+the client retains no token. Enrollment provisions a new worker before starting it.
+Unavailable hosts make distribution visibly incomplete; repeat `auth` before
+enabling them. Repeat it to replace an expired or revoked token.
 GitHub enforces repository permissions; enrollment cannot prove a token is
 read-only, so select that permission when creating it.
 
@@ -96,29 +99,23 @@ Reports give touched packages and runnable selected/total counts.
 Hourly upkeep locks each idle slot and runs cargo-sweep with seven-day age and
 slot_max_gb limits. Busy slots are skipped; maintenance respects exclusive work.
 
-Workers are SSH destinations with roots in host.conf's workers array. Install
-ci-buddy there first, satisfy [the private access requirements](SECURITY.md),
-enroll the token with `auth` (or provision project fetch secrets). Install leaf
-runners with `--worker`; only coordinators run dispatch-service. Free worker
-slots join the commit-distance choice; the worker locks and executes directly.
-Output streams back and its bounded archived run returns to the
-coordinator. Cancellation follows the worker. Exclusive work and gates with a
-bench remain on their coordinator so executables and comparison data share a
-host. There is no automatic retry or cloud provisioning. Optional sccache.env
-is passed to prepare/run containers; never store project fetch credentials there.
-To exercise workers in the end-to-end test, give e2e.py a second coordinator
-endpoint configured to use the first endpoint as its worker.
+Enroll an existing approved tailworker with
+`ci-buddy enroll NAME --coordinator ENDPOINT --root DIRECTORY --host-conf FILE`.
+The coordinator installs its reviewed build executor and uses dispatch-service's
+shared kit to enroll native workers with unique credentials. Normal consumers
+and one exclusive consumer use revision-scoped lanes; the dispatcher chooses an
+available consumer. ci-buddy then chooses a warm slot on that machine. Source
+bundles, logs and bounded results use authenticated CAS; the coordinator persists
+history before acknowledging completion. Cancellation waits for owned-container
+cleanup. There is no SSH job transport, automatic job retry or cloud provisioning.
+Partial setup is reported explicitly; inspect existing units and credentials
+before repeating enrollment. `fetch_hosts` controls secret rotation only.
 
-Install the same commit on coordinator and workers. The coordinator owns reuse;
-a newly dispatched request executes once on the chosen worker under the original queue lease.
-
-Job transport SSH permits only private, loopback or tailnet addresses, with independently pinned
-host keys and separate machine keys. Proxies, forwarding and local SSH commands
-are disabled. Only connection establishment has a five-second bound; running
-jobs have no timeout and are never retried. Worker returns are bounded data,
-cannot overwrite local job identity, and are never executed. These controls do
-not configure host firewalls, cloud ingress or tailnet policy. Keep remote
-workers disabled until the owner verifies the denial checks in SECURITY.md.
+Install the same reviewed revision everywhere. SSH serves client-to-coordinator
+access and setup, with pinned host identity, private address checks and forwarding
+disabled. Runtime workers use dispatch-service's authenticated Tailscale doors.
+Keep remote workers disabled until the owner verifies [network denials](SECURITY.md).
+Optional sccache.env is passed to prepare/run; never put fetch credentials there.
 
 Fetch runs in a separately built trusted image with a fixed Cargo toolchain,
 using a safe snapshot of tracked files and ignoring project Cargo/rustup config.

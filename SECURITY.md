@@ -1,7 +1,8 @@
-# Private job transport
+# Private build workers
 
-ci-buddy accepts jobs over ordinary OpenSSH with separate submitting-machine
-keys. Never use Tailscale SSH for job automation. Machine creation, accounts,
+Clients contact their approved coordinator over pinned private OpenSSH. Workers
+use dispatch-service's existing PEP, signed per-request proofs and authenticated
+CAS over Tailscale. Never use Tailscale SSH for automation. Machine creation, accounts,
 tailnet policy, host firewalls, cloud lifetimes and network-denial checks belong
 to tailworker; follow its README before enabling an endpoint. Installing
 ci-buddy does not establish those controls, and a two-root transport test does
@@ -24,12 +25,15 @@ Roots are owner-only and installation is rootless. A host's queues share its
 machine lock; installing refuses conflicting existing locks. Scheduling lanes
 are not reservations: each execution host enforces its own jobs, slots, disk
 floor and container memory cap. Offline endpoints do not block installation.
-Exclusive work and gates with a bench stay on the coordinator.
-dispatch-service listens only on owner-private Unix sockets and uses its native
-job claims, deduplication and cancellation barrier. Only a coordinator runs the
-queue; workers execute directly through pinned SSH. Cancellation waits for the
-owned executor's cleanup. A lost worker connection remains visibly incomplete
-when its stopped state or return data cannot be verified; it is never resubmitted.
+Exclusive work can use any enrolled machine; a gate's benchmark is pinned to its
+correctness worker. The coordinator's app API is an owner-private Unix socket.
+Only the authenticated PEP ports are published, on the configured private address;
+dispatcher and CAS backend ports remain inside the rootless pod namespace.
+Each consumer has its own credential, generated on that worker. The trusted
+installed executor launches isolated rootless workload containers; it never gives
+them the runner credential, container socket or coordinator issuer key.
+Cancellation retains the lease until cleanup and application persistence finish.
+A crashed worker fails visibly; it is never automatically resubmitted or declared clean.
 
 Only the trusted installed fetch image receives project secrets. Keep them in
 `projects/NAME/secrets`, directories 0700 and files 0600. The fetch recipe and
@@ -42,8 +46,8 @@ machine boundary, not a property proved by ci-buddy's offline run container.
 
 `auth` enrolls a GitHub token over the same pinned private SSH transport.
 It is stored outside projects at the owner-only root's `github-token`, mode 0600,
-and mounted read-only only in fetch. Owner Git configuration stores a fingerprint,
-not the token. Configured host pools and host.conf workers authorize distribution;
+and mounted read-only only in fetch. The client retains no token.
+Configured host pools and host.conf fetch_hosts authorize distribution;
 submitted source cannot add destinations. Fetch supplies the token through Git's
 credential helper and rewrites GitHub SSH URLs to HTTPS. Create a fine-grained
 token with selected repositories and Contents read-only; GitHub enforces these

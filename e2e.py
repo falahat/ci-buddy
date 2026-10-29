@@ -15,12 +15,14 @@ author = ["git", "-c", "user.name=example", "-c", "user.email=example@example.in
 endpoint = sys.argv[1]
 destination, separator, host_root = endpoint.partition(":")
 assert separator and destination and host_root.startswith("/"), "provide destination:private-root"
+worker_destination, worker_separator, worker_root = (sys.argv[2] if len(sys.argv) > 2 else endpoint).partition(':')
+assert worker_separator and worker_root.startswith('/'), 'provide a private worker endpoint'
 sys.stdout.reconfigure(encoding="utf-8")
 
 with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
     assert Path(directory).resolve().parent == Path(tempfile.gettempdir()).resolve()
     os.environ['GIT_CONFIG_GLOBAL'] = str(Path(directory, 'gitconfig'))
-    for allowed in sys.argv[1:]:
+    for allowed in (endpoint,):
         subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', allowed], check=True)
     source = Path(directory, "example")
     shutil.copytree(root / "example", source)
@@ -71,6 +73,11 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
         command = shlex.join(["python3", "-c", probe + action, host_root, run])
         return subprocess.check_output(["ssh", destination, command], encoding="utf-8")
 
+    def worker_probe(action, run):
+        script = probe.replace("/ 'runs' /", "/ 'executions' /")
+        command = shlex.join(["python3", "-c", script + action, worker_root, run])
+        return subprocess.check_output(["ssh", worker_destination, command], encoding="utf-8")
+
     def refs():
         return run_probe("print(subprocess.check_output(['git','--git-dir',str(project/'git'),"
                          "'for-each-ref','--format=%(refname)','refs/ci-buddy'],text=True))")
@@ -120,7 +127,7 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
     try:
         assert running.poll() is None
         assert run in call("status")
-        mode = subprocess.check_output(["ssh", destination, "podman", "inspect", "--format",
+        mode = subprocess.check_output(["ssh", worker_destination, "podman", "inspect", "--format",
                                         "{{.HostConfig.NetworkMode}}", "ci-buddy-" + run], encoding="utf-8")
         assert mode.strip() == "none", mode
     finally:
@@ -129,7 +136,7 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
         running.communicate()
     assert running.returncode != 0
     call("cancel", run)
-    run_probe("""slot = (out / 'slot').read_text().strip()
+    worker_probe("""slot = (out / 'slot').read_text().strip()
 with (project / 'slots' / slot / 'lock').open('r+') as lock:
     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)""", run)
     call("run", "--", "printf", "slot-released\\n")
@@ -145,7 +152,7 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
     verifying = launch("verify", commit)
     try:
         assert verifying.stdout.readline().startswith("waiting bench_task=")
-        run_probe("assert not (out / 'bench-exit').read_text().strip()\n(out / 'release').write_text('release')", run)
+        worker_probe("assert not (out / 'bench-exit').read_text().strip()\n(out / 'release').write_text('release')", run)
         report = verifying.communicate()[0]
     finally:
         if verifying.poll() is None:
@@ -215,11 +222,11 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
         assert answer or question[0] in ("failures", "flaky", "gates"), question
         if question[0] == "test": assert answer["runs"] > 0
     if len(sys.argv) > 2:
-        # Provision the second endpoint with this root in its workers first.
-        config.write_text(original.replace(endpoint, sys.argv[2]))
-        subprocess.run(author + ["commit", "-qam", "worker coordinator"], cwd=source, check=True)
+        # The fixture's only consumers belong to the separately installed worker.
         worker = call("test", "--rerun", "-E", "package(=consumer)")
-        assert "worker=" in worker and "worker_returned=" in worker
+        run = run_id(worker)
+        run_probe("assert json.loads((out / 'job.json').read_text())['node']", run)
+        worker_probe("assert (out / 'job.json').is_file()", run)
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
         answer = json.loads(call("history", "change", commit))["answer"]
         assert answer, "worker result did not return to the coordinator history"
@@ -236,6 +243,6 @@ for name in ('job.json','task','slot','exit','bench-task','bench-exit'):
         raise AssertionError('writable control: ' + name)
 sys.exit(3)"""
         result = call("run", "--", "python3", "-c", readonly, status=3)
-        assert "worker_returned=" in result and result.count('worker-exit-three-once') == 1, result
+        assert result.count('worker-exit-three-once') == 1, result
     assert refs() == baseline_refs, "a completed or cancelled candidate ref remains"
 print("example end-to-end: green")

@@ -8,28 +8,12 @@ if [[ ${1:-} != --server ]]; then
     [[ $revision =~ ^[0-9a-f]{40}$ ]] || exit 2
     command=${1:?command required}; shift
     if [[ $command == auth ]]; then exec python3 "$client_dir/auth.py" client "$@"; fi
-    if [[ $command == enroll ]]; then
-        arguments=()
-        while (($#)); do
-            if [[ $1 == --root ]]; then arguments+=("--root=${2:?root required}"); shift 2
-            else arguments+=("$1"); shift; fi
-        done
-        MSYS2_ARG_CONV_EXCL="--root=${MSYS2_ARG_CONV_EXCL:+;$MSYS2_ARG_CONV_EXCL}" exec python3 "$client_dir/enroll.py" "${arguments[@]}"
-    fi
     case $command in
         run|test|gate) probe=(version) ;;
         status|history|log|cancel|verify|merge) probe=(version --read-only) ;;
+        enroll) ;;
         *) echo 'expected run, test, gate, verify, merge, status, log or cancel' >&2; exit 2 ;;
     esac
-    cd "$(git rev-parse --show-toplevel)"
-    while IFS= read -r line; do
-        if [[ $line =~ ^(name|host|main)[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
-            printf -v "${BASH_REMATCH[1]}" '%s' "${BASH_REMATCH[2]}"
-        fi
-    done <ci-buddy.toml
-    : "${name:?}" "${host:?}" "${main:?}"
-    [[ $name =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
-    git check-ref-format "refs/heads/$main"
     # Endpoints belong to owner configuration, never executable project input.
     mapfile -t configured < <(git config --global --get-all ci-buddy.host || true)
     ((${#configured[@]})) || { echo 'install a trusted client with bash install-client.sh --host <destination>[:<root>]' >&2; exit 2; }
@@ -42,6 +26,48 @@ if [[ ${1:-} != --server ]]; then
         [[ $remote_root != *$'\n'* && $remote_root != *$'\r'* ]] || return 2
         [[ $destination != local || $remote_root != .ci-buddy ]] || remote_root=$HOME/.ci-buddy
     }
+    if [[ $command == enroll ]]; then
+        machine=${1:?existing machine required}
+        shift
+        coordinator=${configured[0]}
+        while (($#)); do
+            option=$1
+            shift
+            if [[ $option == --*=* ]]; then
+                value=${option#*=}
+                option=${option%%=*}
+            else
+                value=${1:?option value required}
+                shift
+            fi
+            case $option in
+                --root) worker_root=$value ;;
+                --host-conf) host_conf=$value ;;
+                --coordinator) coordinator=$value ;;
+                *) echo 'expected --root, --host-conf or --coordinator' >&2; exit 2 ;;
+            esac
+        done
+        : "${worker_root:?worker root required}" "${host_conf:?public host.conf required}"
+        allowed=false
+        for endpoint in "${configured[@]}"; do
+            [[ $endpoint != "$coordinator" ]] || allowed=true
+        done
+        $allowed || { echo 'coordinator is outside the approved host pool' >&2; exit 2; }
+        endpoint_parts "$coordinator"
+        arguments=(python3 "$remote_root/bin/enroll.py" "$remote_root" "$machine" "--root=$worker_root" --host-conf -)
+        if [[ $destination == local ]]; then "${arguments[@]}" <"$host_conf"
+        else "${transport[@]}" "$destination" "$(printf '%q ' "${arguments[@]}")" <"$host_conf"; fi | python3 "$client_dir/safe_output.py"
+        exit
+    fi
+    cd "$(git rev-parse --show-toplevel)"
+    while IFS= read -r line; do
+        if [[ $line =~ ^(name|host|main)[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+            printf -v "${BASH_REMATCH[1]}" '%s' "${BASH_REMATCH[2]}"
+        fi
+    done <ci-buddy.toml
+    : "${name:?}" "${host:?}" "${main:?}"
+    [[ $name =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
+    git check-ref-format "refs/heads/$main"
     invoke() {
         local endpoint=$1; shift
         endpoint_parts "$endpoint" || return
@@ -108,14 +134,15 @@ if [[ ${1:-} != --server ]]; then
         run|test|gate) ;;
         *) echo 'expected run, test, gate, verify, merge, status, log or cancel' >&2; exit 2 ;;
     esac
-    python3 "$client_dir/auth.py" client "$selected" "${available[@]}"
     if [[ $command == test ]]; then
         arguments=("$@")
-        for ((i=0; i<${#arguments[@]}; i++)); do
-            if [[ ${arguments[i]} == --since ]]; then
-                i=$((i+1)); arguments[i]=$(git rev-parse "${arguments[i]:?base required}")
-            fi
-        done
+        i=0
+        [[ ${arguments[0]:-} != --rerun ]] || i=1
+        if [[ ${arguments[i]:-} == --since ]]; then
+            i=$((i+1))
+            arguments[i]=$(git rev-parse "${arguments[i]:?base required}")
+            since=${arguments[i]}
+        fi
         set -- "${arguments[@]}"
     fi
     candidate=$(git rev-parse HEAD)
@@ -127,14 +154,15 @@ if [[ ${1:-} != --server ]]; then
         *) exit "$changed" ;;
     esac
     main_ref=$(git rev-parse --quiet --verify "origin/$main" || git rev-parse --verify "$main")
-    base=$(git merge-base "$candidate" "$main_ref")
+    base=${since:-$(git merge-base "$candidate" "$main_ref")}
     branch=$(git symbolic-ref --quiet --short HEAD) || { status=$?; [[ $status == 1 ]] || exit "$status"; branch=""; }
     run=$((${EPOCHREALTIME/./} * 1000 + RANDOM % 1000))
     remote init
     endpoint_parts "$selected"
     target=$remote_root/projects/$name/git
     [[ $destination == local ]] || target=$destination:$target
-    GIT_SSH_COMMAND=$(printf '%q ' "${transport[@]}") GIT_SSH_VARIANT=simple git push --quiet --no-verify "$target" "$candidate:refs/ci-buddy/$run" 2>&1 | python3 "$client_dir/safe_output.py"
+    GIT_SSH_COMMAND=$(printf '%q ' "${transport[@]}") GIT_SSH_VARIANT=simple git push --atomic --quiet --no-verify "$target" \
+        "$candidate:refs/ci-buddy/$run" "$base:refs/ci-buddy/base-$run" 2>&1 | python3 "$client_dir/safe_output.py"
     printf 'host=%s\n' "$selected"
     # After submit begins, a lost connection is ambiguous: never fail over/retry.
     if remote submit "$run" "$command" "$candidate" "$base" "$branch" "${CI_BUDDY_SUBMITTER:-$HOSTNAME}" "$@"; then exit 0

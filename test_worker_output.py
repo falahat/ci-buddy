@@ -15,8 +15,10 @@ if sys.platform == 'win32':
     sys.modules.setdefault('fcntl', types.ModuleType('fcntl'))
 import data
 import history
-import workers
+import results
 import safe_output
+import control
+import subprocess
 
 
 class WorkerOutput(unittest.TestCase):
@@ -25,6 +27,7 @@ class WorkerOutput(unittest.TestCase):
         self.folder = self.root / 'projects/example'
         self.out = self.folder / 'runs/7'
         self.out.mkdir(parents=True)
+        (self.root / 'containers').mkdir()
         self.job = dict(kind='test', key='key', tree='a' * 40, commit='b' * 40,
                         branch='topic', submitter='owner', argv=[], queued_at=1)
         self.account = dict(queued_at=2, started_at=3, ended_at=4, exit=0,
@@ -47,7 +50,7 @@ class WorkerOutput(unittest.TestCase):
             return path
         destination = self.root / 'results'
         destination.mkdir(exist_ok=True)
-        workers.unpack_results(path, destination)
+        results.unpack_results(path, destination)
         return destination
 
     def xml(self, duration='0.002', body=''):
@@ -63,12 +66,14 @@ class WorkerOutput(unittest.TestCase):
                     'junit/ci/junit.xml': self.xml()}
         archive = self.archive([(name, 0o600, tarfile.REGTYPE, body.encode())
                                 for name, body in contents.items()], unpack=False)
-        replies = iter((b'compressed archive', archive.read_bytes()))
-        def transfer(command, destination, limit, **options):
-            destination.write(next(replies))
-            return 0
-        with mock.patch.object(workers, 'receive', side_effect=transfer):
-            workers.collect(self.root, 'example', '7', 'local:' + str(self.root / 'worker'), 0)
+        compressed = subprocess.check_output(['zstd', '-q', '-c', str(archive)])
+        def transfer(root, operation, address, destination, **options):
+            self.assertEqual(operation, 'get')
+            destination.write_bytes(compressed)
+        action = dict(outputs={'run': dict(address='sha256:' + 'a' * 64, size=len(compressed))},
+                      metrics={'exit': 0}, runner={'node': 'native-worker'})
+        with mock.patch.object(results, 'cas', side_effect=transfer):
+            results.collect(self.root, 'example', '7', action, 'core')
         with closing(history.db(self.folder)) as database:
             row = dict(database.execute('SELECT * FROM runs').fetchone())
             expected = self.job | dict(id=7, argv='[]')
@@ -98,18 +103,18 @@ class WorkerOutput(unittest.TestCase):
         self.assertRaises(ValueError, self.archive, [('extra.txt', 0o600, tarfile.REGTYPE, 1)] * 2)
         for limit, name in (('OUTPUT_LIMIT', 'extra.txt'), ('ARCHIVE_LIMIT', 'extra.txt'),
                             ('HISTORY_LIMIT', 'report.txt')):
-            with self.subTest(limit=limit), mock.patch.object(workers, limit, 1), self.assertRaises(ValueError):
+            with self.subTest(limit=limit), mock.patch.object(results, limit, 1), self.assertRaises(ValueError):
                 self.archive([(name, 0o600, tarfile.REGTYPE, 2)])
 
     def test_canonical_identity_and_rejected_history(self):
-        self.assertNotIn('queued_at', workers.accounting(self.account, 1, 0))
+        self.assertNotIn('queued_at', results.accounting(self.account, 1, 0))
         for field, value in (('exit', True), ('exit', 1), ('cpu_s', float('nan')),
                              ('cpu_s', -1), ('peak_bytes', 2.5), ('queued_at', None),
                              ('started_at', 5), ('ended_at', float('inf'))):
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
-                workers.accounting(self.account | {field: value}, 1, 0)
+                results.accounting(self.account | {field: value}, 1, 0)
         for slot in (0, True, 1.5):
-            self.assertRaises(ValueError, workers.accounting, self.account, slot, 0)
+            self.assertRaises(ValueError, results.accounting, self.account, slot, 0)
         cases = [('phases.tsv', '../escape\t1\t1\n'), ('phases.tsv', 'test\tnan\t0\n')]
         cases += [('junit/ci/junit.xml', self.xml(value)) for value in ('-1', 'inf', 'nan')]
         cases += [('junit/ci/junit.xml', '<!DOCTYPE testsuite []>' + self.xml()),
@@ -132,12 +137,18 @@ class WorkerOutput(unittest.TestCase):
     def test_stream_limit_and_terminal_controls(self):
         raw = b'hello\x1b[31m\x07\r\bworld\n'
         output = io.BytesIO()
-        command = [sys.executable, '-c', 'import sys;sys.stdout.buffer.write(' + repr(raw) + ')']
-        with mock.patch('sys.stdout', new_callable=io.StringIO) as displayed:
-            self.assertEqual(workers.receive(command, output, 128, display=True), 0)
-            self.assertEqual(displayed.getvalue(), 'hello[31mworld\n')
+        queue = mock.MagicMock()
+        queue.__enter__.return_value = queue
+        queue.logs.return_value = dict(entries=[dict(offset=0, address='sha256:' + 'a' * 64, size=len(raw))],
+                                       next_offset=len(raw), done=True)
+        def download(root, operation, address, path, **options):
+            path.write_bytes(raw)
+        with mock.patch.object(control, 'client', return_value=queue), mock.patch.object(results, 'cas', side_effect=download), \
+                mock.patch('sys.stdout', types.SimpleNamespace(buffer=output)):
+            control.logs(self.root, 'task')
+            with mock.patch.object(results, 'OUTPUT_LIMIT', 2), self.assertRaises(ValueError):
+                control.logs(self.root, 'task')
         self.assertEqual(output.getvalue(), raw)
-        self.assertRaises(ValueError, workers.receive, command, io.BytesIO(), 2)
         filtered = io.StringIO()
         safe_output.stream(io.BufferedReader(io.BytesIO(raw + '\u202e'.encode())), filtered)
         self.assertEqual(filtered.getvalue(), 'hello[31mworld\n')

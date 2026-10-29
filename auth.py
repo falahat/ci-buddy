@@ -1,6 +1,5 @@
 """Owner-enrolled GitHub credentials; transport payloads never enter job data."""
 import getpass
-import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -62,37 +61,20 @@ def distribute(token, endpoints, mode, announce=False):
             print('credential unavailable: ' + endpoint, file=sys.stderr)
             failed = True
     if failed:
-        raise ValueError('incomplete distribution; available hosts can provision peers before submission')
+        raise ValueError('incomplete distribution; run ci-buddy auth again before enabling unavailable fetch hosts')
 
 
 def install(root, token):
     store(root, token)
-    distribute(token, tomllib.loads((root / 'host.conf').read_text())['workers'], 'store')
+    distribute(token, tomllib.loads((root / 'host.conf').read_text())['fetch_hosts'], 'store')
 
 
 def client(arguments):
-    endpoints = subprocess.check_output(['git', 'config', '--global', '--get-all', 'ci-buddy.host']).decode().splitlines()
     if arguments:
-        if set(arguments) - set(endpoints):
-            raise ValueError('credential destination is outside the approved host pool')
-        selected, *available = arguments
-        expected = subprocess.run(['git', 'config', '--global', '--get', 'ci-buddy.token'],
-                                  stdout=subprocess.PIPE, check=False).stdout.strip()
-        if not expected:
-            return
-        for endpoint in dict.fromkeys([selected, *available]):
-            try:
-                token = rpc(endpoint, 'read')
-            except (OSError, ValueError, subprocess.CalledProcessError):
-                continue
-            if token and hashlib.sha256(token).hexdigest().encode() == expected:
-                if endpoint != selected:
-                    rpc(selected, 'install', token)
-                return
-        raise ValueError('enrolled token unavailable on approved hosts; run ci-buddy auth')
+        raise ValueError('auth takes no destinations; configure the approved host pool first')
+    endpoints = subprocess.check_output(['git', 'config', '--global', '--get-all', 'ci-buddy.host']).decode().splitlines()
     warnings.simplefilter('error', getpass.GetPassWarning)
     token = validate(getpass.getpass('GitHub token (selected repositories, Contents: read-only): ').encode())
-    subprocess.run(['git', 'config', '--global', 'ci-buddy.token', hashlib.sha256(token).hexdigest()], check=True)
     distribute(token, endpoints, 'install', announce=True)
 
 
@@ -100,9 +82,7 @@ if __name__ == '__main__':
     try:
         mode, *arguments = sys.argv[1:]
         root = Path(__file__).resolve().parent.parent
-        if mode == 'read':
-            sys.stdout.buffer.write(read(root))
-        elif mode == 'check':
+        if mode == 'check':
             read(root)
         elif mode in ('store', 'install'):
             token = validate(sys.stdin.buffer.read(512))
