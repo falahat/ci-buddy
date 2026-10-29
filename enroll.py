@@ -2,7 +2,6 @@
 import argparse
 import fcntl
 import hashlib
-import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -51,14 +50,12 @@ def enroll(root, args):
         with tarfile.open(runtime) as archive:
             if any(not entry.isfile() and not entry.isdir() for entry in archive):
                 raise ValueError('reviewed runtime contains links or special files')
+        (stage / 'revision').write_text(revision)
         with tempfile.TemporaryFile() as payload:
             with tarfile.open(fileobj=payload, mode='w') as archive:
                 archive.add(runtime, arcname='runtime.tar', recursive=False)
-                for filename, content in (('host.conf', conf), ('revision', revision)):
-                    body = content.encode()
-                    entry = tarfile.TarInfo(filename)
-                    entry.size = len(body)
-                    archive.addfile(entry, io.BytesIO(body))
+                for filename in ('host.conf', 'revision'):
+                    archive.add(stage / filename, arcname=filename, recursive=False)
             payload.seek(0)
             subprocess.run(remote + ['bash', '-c', data.read_file(root / 'bin/install.sh'), '_',
                                      '--root', args.root, '--archive'], stdin=payload, check=True)
