@@ -137,7 +137,7 @@ def validate(value, job, identifier, status):
     for index, step in enumerate(value['steps']):
         if (not isinstance(step, dict) or set(step) != set(('name',) + TIMING + ('exit', 'phases'))
                 or step['name'] != job['steps'][index]['name']
-                or type(step['exit']) is not int or not 0 <= step['exit'] <= 255
+                or not (step['exit'] is None and status == 137 or type(step['exit']) is int and 0 <= step['exit'] <= 255)
                 or not isinstance(step['phases'], list) or len(step['phases']) > 4096):
             raise ValueError('normalized step differs from canonical plan')
         for field in TIMING:
@@ -205,8 +205,9 @@ def normalize(artifacts, job, identifier, slot):
         steps.append(step)
         started, ended = step['started_at'], step['ended_at']
         if started is not None:
+            failure = f"{name} exited {step['exit']}" if step['exit'] is not None else f'{name} cancelled before command exit'
             tests.add('phase/' + name, 'passed' if step['exit'] == 0 else 'failed', (ended - started) * 1000,
-                      None if step['exit'] == 0 else f"{name} exited {step['exit']}")
+                      None if step['exit'] == 0 else failure)
             if name == 'profiling':
                 tests.add('phase/profiling-wait', 'passed', (started - step['queued_at']) * 1000, None)
             report.append(f"{name} queue_s={started - step['queued_at']:.3f} run_s={ended - started:.3f} exit={step['exit']} cpu_s={step['cpu_s']} peak_bytes={step['peak_bytes']} cap_killed={step['cap_killed']} scope=fetch+prepare+run peak_includes_file_cache=true\n")

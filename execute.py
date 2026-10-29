@@ -56,7 +56,7 @@ def interrupt(signum, frame):
         exists = subprocess.run(['podman', 'container', 'exists', CONTAINER]).returncode
         if exists == 0:
             killed = subprocess.run(['podman', 'kill', CONTAINER], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-            stopped = subprocess.run(['podman', 'wait', CONTAINER], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            stopped = subprocess.run(['podman', 'wait', '--ignore', CONTAINER], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
             KILLED |= killed and stopped
             unconfirmed |= not stopped
         elif exists != 1:
@@ -79,27 +79,26 @@ def cancelled(signum, frame):
         raise InterruptedError('cancelled before starting a command')
 
 
-def run(argv, log, fds=()):
+def run(argv, fds=()):
     global CHILD, CONTAINER
     if CANCELLED:
         raise InterruptedError('cancelled before command started')
-    CONTAINER = next((arg[7:] for arg in argv if isinstance(arg, str) and arg.startswith('--name=')), None)
-    CHILD = subprocess.Popen(list(map(str, argv)), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             pass_fds=fds, start_new_session=True)
-    if CANCELLED:
-        interrupt(signal.SIGTERM, None)
+    # Register the child before handling cancellation; unblock its inherited mask.
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     try:
-        for block in iter(lambda: CHILD.stdout.read1(65536), b''):
-            log.buffer.write(block)
-            log.flush()
-            sys.stdout.buffer.write(block)
-            sys.stdout.buffer.flush()
+        CONTAINER = next((arg[7:] for arg in argv if isinstance(arg, str) and arg.startswith('--name=')), None)
+        CHILD = None
+        CHILD = subprocess.Popen(list(map(str, argv)), pass_fds=fds, start_new_session=True,
+                                 preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, previous))
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+    try:
+        status = CHILD.wait()
     except BaseException:
         if not CANCELLED:
             interrupt(signal.SIGTERM, None)
         CHILD.wait()
         raise
-    status = CHILD.wait()
     if status:
         if status < 0 and not KILLED:
             interrupt(signal.SIGTERM, None)
@@ -143,7 +142,7 @@ def run_step(root, project, identifier, work, job, index, slot, slot_fd):
     raw.mkdir(parents=True)
     limits = data.host_config(root)
     with data.open_file((root / 'turnstile').resolve(), 'a') as turnstile, \
-            data.open_file((root / 'machine.lock').resolve(), 'a') as machine, data.open_file(raw / 'runner.log', 'w') as log:
+            data.open_file((root / 'machine.lock').resolve(), 'a') as machine:
         fcntl.flock(turnstile, fcntl.LOCK_EX)
         fcntl.flock(machine, fcntl.LOCK_EX if step['exclusive'] else fcntl.LOCK_SH)
         fcntl.flock(turnstile, fcntl.LOCK_UN)
@@ -153,7 +152,7 @@ def run_step(root, project, identifier, work, job, index, slot, slot_fd):
         def phase(name):
             step.setdefault('phases', []).append([name, time.time()])
         def checked(*argv):
-            run(argv, log, fds)
+            run(argv, fds)
         def build(image, context, recipe):
             with data.open_file(root / 'containers' / (image + '.lock'), 'a') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -270,26 +269,42 @@ def execute(root, request):
     source = (work / request['inputs']['source']).resolve()
     if work != Path.cwd().resolve() or request['outputs_dir'] != 'outputs' or not source.is_relative_to(work):
         raise ValueError('native work directory differs')
-    signal.signal(signal.SIGTERM, cancelled)
     folder = root / 'projects' / project
-    for name in ('slots', 'data', 'secrets'):
-        (folder / name).mkdir(mode=0o700, parents=True, exist_ok=True)
     repository = folder / 'git'
-    with data.open_file(folder / 'submit.lock', 'a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if not repository.exists():
-            subprocess.run(['git', 'init', '--quiet', '--bare', str(repository)], check=True)
-        data.git(repository, 'fetch', '--atomic', '--quiet', str(source),
-                 'refs/ci-buddy/source:refs/ci-buddy/' + identifier, 'refs/ci-buddy/base:refs/ci-buddy/base-' + identifier)
+    artifacts = work / 'artifacts'
+    (artifacts / 'out').mkdir(mode=0o700, parents=True)
+    signal.signal(signal.SIGTERM, cancelled)
     try:
-        if (data.git(repository, 'rev-parse', 'refs/ci-buddy/' + identifier) != job['commit']
-                or data.git(repository, 'rev-parse', 'refs/ci-buddy/base-' + identifier) != job['base']
-                or data.git(repository, 'rev-parse', job['commit'] + '^{tree}') != job['tree']):
-            raise ValueError('source bundle differs from canonical job')
-        data.write_file(work / 'job.json', json.dumps(job))
-        artifacts = work / 'artifacts'
-        (artifacts / 'out').mkdir(mode=0o700, parents=True)
-        job = pipeline(root, project, identifier, work, job)
+        try:
+            for name in ('slots', 'data', 'secrets'):
+                (folder / name).mkdir(mode=0o700, parents=True, exist_ok=True)
+            with data.open_file(folder / 'submit.lock', 'a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if not repository.exists():
+                    subprocess.run(['git', 'init', '--quiet', '--bare', str(repository)], check=True)
+                data.git(repository, 'fetch', '--atomic', '--quiet', str(source),
+                         'refs/ci-buddy/source:refs/ci-buddy/' + identifier, 'refs/ci-buddy/base:refs/ci-buddy/base-' + identifier)
+            if (data.git(repository, 'rev-parse', 'refs/ci-buddy/' + identifier) != job['commit']
+                    or data.git(repository, 'rev-parse', 'refs/ci-buddy/base-' + identifier) != job['base']
+                    or data.git(repository, 'rev-parse', job['commit'] + '^{tree}') != job['tree']):
+                raise ValueError('source bundle differs from canonical job')
+            data.write_file(work / 'job.json', json.dumps(job))
+            job = pipeline(root, project, identifier, work, job)
+        except InterruptedError:
+            if not CANCELLED:
+                raise
+            pending = next((step for step in job['steps'] if 'exit' not in step), None)
+            if pending is not None:
+                pending.setdefault('queued_at', job['queued_at'] if pending is job['steps'][0] else time.time())
+                pending.update(exit=None, ended_at=time.time())
+            job['exit'] = 137
+        # No workload remains; finish bounded persistence even after cancellation.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        with data.open_file(work / 'invoke.log') as log:
+            captured = log.buffer.read(results.OUTPUT_LIMIT + 1)
+        if len(captured) > results.OUTPUT_LIMIT:
+            raise ValueError('native log exceeds byte limit')
+        (artifacts / 'invoke.log').write_bytes(captured)
         summary = results.normalize(artifacts, job, identifier, job.get('slot'))
         print(summary['report'], end='', flush=True)
         (work / 'outputs').mkdir(exist_ok=True)
@@ -298,7 +313,8 @@ def execute(root, request):
         data.write_file(work / 'invoke-result.json', json.dumps(dict(outputs=dict(results='outputs/results.json',
                         logs='outputs/logs.tar.zst'), metrics=dict(exit=summary['exit']))))
     finally:
-        data.discard(repository, identifier)
+        if repository.exists():
+            data.discard(repository, identifier)
 
 
 if __name__ == '__main__':

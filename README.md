@@ -83,7 +83,8 @@ Containers inherit slot/machine locks and enforce memory and free-disk limits.
 Reports separate queue, checkout, image, fetch, prepare and command time, labelling
 unaccounted time. CPU covers fetch/prepare/run; peak memory includes file cache.
 Missing statistics are incomplete; image-build CPU is excluded. Native CAS carries
-source, opaque logs and validated normalized step results. The coordinator retains
+source, opaque logs and validated normalized step results. The native runner owns
+stdout capture; ci-buddy archives its bounded log without a second logger. The coordinator retains
 SQLite history, nextest JUnit results and failed phase excerpts before acknowledging
 completion. Ask `history test <name>`, `history failures --branch <branch>` or
 `--range <base>..<tip>`, `history slowest [--since 7d]`, `history change <ref>`,

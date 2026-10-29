@@ -87,6 +87,17 @@ class WorkerOutput(unittest.TestCase):
             phases = dict(database.execute('SELECT name,status FROM results JOIN tests ON tests.id=results.test'))
             self.assertEqual((phases['phase/correctness'], phases['phase/profiling']), ('passed', 'failed'))
 
+    def test_cancelled_admission_has_no_fabricated_command_exit(self):
+        self.job.update(exit=137, steps=[self.job['steps'][0] | dict(exit=None, started_at=None, phases=[])])
+        for path in self.step.iterdir():
+            path.unlink()
+        value = self.normalize()
+        self.assertEqual(self.collect(value), 137)
+        self.assertIsNone(value['steps'][0]['exit'])
+        self.assertIsNone(value['steps'][0]['cpu_s'])
+        self.assertIn('ended before start', value['report'])
+        self.assertRaises(ValueError, results.validate, value | dict(exit=0), self.job, self.identifier, 0)
+
     def test_canonical_spec_types_arguments_and_budget(self):
         job = dict(self.job, queued_at='1.0', steps=[{key: self.job['steps'][0][key] for key in results.PLAN}])
         del job['exit']
