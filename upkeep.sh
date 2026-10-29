@@ -5,8 +5,10 @@ values=$(python3 "$root/bin/data.py" host "$root"); eval "$values"
 for project in "$root/projects/"*; do
     [[ -d $project ]] || continue
     # Retention expires disposable artifacts, never the SQLite result rows.
-    find "$project/runs" -mindepth 1 -maxdepth 1 -type d -mmin "+$((keep_days * 1440))" -exec rm -rf -- {} +
-    find "$project/logs" -type f -name '*.tar.zst' -mmin "+$((keep_days * 1440))" -delete
+    for kind in runs executions; do
+        [[ ! -d $project/$kind ]] || find "$project/$kind" -mindepth 1 -maxdepth 1 -type d -mmin "+$((keep_days * 1440))" -exec rm -rf -- {} +
+    done
+    [[ ! -d $project/logs ]] || find "$project/logs" -type f -name '*.tar.zst' -mmin "+$((keep_days * 1440))" -delete
     for slot in "$project/slots/"*; do
         [[ -d $slot/src/target ]] || continue
         (

@@ -1,9 +1,8 @@
 set -euo pipefail
-root=$1 project=$2 run=$3 worker=${5:-}
+root=$1 project=$2 run=$3 out=$5
 export PATH="$root/bin:$PATH"
 export TMPDIR="$root/containers"
 folder=$root/projects/$project
-out=$folder/runs/$run
 trap 'git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"' EXIT
 write_field() { python3 "$root/bin/data.py" write "$out/$1" "$2"; }
 phase() { python3 "$root/bin/data.py" phase "$out" "${prefix//-/_}" "$1"; }
@@ -19,30 +18,14 @@ started=$EPOCHREALTIME
 started_field=started_at; [[ -z $prefix ]] || started_field=bench_started_at
 finish() {
     status=$?
-    archive=yes
     git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
     python3 "$root/bin/data.py" report "$out" "$prefix" "$started" "$EPOCHREALTIME" "$status" || {
         status=1
         python3 "$root/bin/data.py" stamp "$out" "${prefix//-/_}exit" "$status"
     }
-    if [[ $worker != worker ]]; then
-        exec 9>"$folder/submit.lock"
-        flock 9
-        python3 "$root/bin/data.py" record "$out"
-        if [[ $status == 0 && $kind == gate && -n ${bench:-} ]]; then
-            python3 "$root/bin/data.py" stamp "$out" bench_queued_at "$EPOCHREALTIME"
-            id=$(<"$out/task")
-            write_field bench-task "$id"
-            python3 "$root/bin/data.py" write "$out/bench-runner.log" ''
-            echo "bench_task=$id"
-            archive=no
-        fi
-        flock -u 9
-    fi
     python3 "$root/bin/data.py" read "$out/report.txt" || true
     exec 1>&8 2>&8
     wait "$logger"
-    [[ $archive == no ]] || python3 "$root/bin/archive.py" "$out"
     write_field "${prefix}exit" "$status"
 }
 trap finish EXIT
@@ -80,7 +63,7 @@ mkdir -p "$slot/src"
 [[ -d $slot/git ]] || git clone --quiet --bare "$folder/git" "$slot/git"
 repository=(git -c "core.hooksPath=$root/bin" -c core.fsmonitor=false -c gc.auto=0 -c maintenance.auto=false
     --git-dir="$slot/git" --work-tree="$slot/src")
-"${repository[@]}" fetch --quiet "$folder/git" "$commit"
+"${repository[@]}" fetch --quiet "$folder/git" "$commit" "$base"
 "${repository[@]}" checkout --quiet --force --detach "$commit"
 "${repository[@]}" clean -fdq -e target -e .git
 git -C "$folder/git" update-ref "refs/slots/$chosen" "$commit"

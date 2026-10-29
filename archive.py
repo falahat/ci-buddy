@@ -1,4 +1,3 @@
-import datetime
 import os
 from pathlib import Path
 import stat
@@ -6,21 +5,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import safe_output
 
 out = Path(sys.argv[1])
-if sys.argv[2:] == ["log"]:
-    saved = next((out.parents[1] / "logs").glob("*/" + out.name + ".tar.zst"))
-    with subprocess.Popen(["zstd", "-d", "-q", "-c", str(saved)], stdout=subprocess.PIPE) as process:
-        with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
-            for entry in archive:
-                if entry.isfile() and entry.name.endswith("runner.log"):
-                    safe_output.stream(archive.extractfile(entry), sys.stdout)
-        if process.wait():
-            raise subprocess.CalledProcessError(process.returncode, process.args)
-    sys.exit()
-month = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
-destination = out.parent.parent / "logs" / month / (out.name + ".tar.zst")
+destination = Path(sys.argv[2])
 destination.parent.mkdir(parents=True, exist_ok=True)
 descriptor, temporary_name = tempfile.mkstemp(dir=destination.parent, prefix=out.name + ".")
 temporary = Path(temporary_name)

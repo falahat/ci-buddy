@@ -17,6 +17,11 @@ def git(folder, *args):
     return subprocess.check_output(["git", "-C", str(folder), *args], text=True).strip()
 
 
+def discard(repository, run):
+    for name in (run, 'base-' + run):
+        git(repository, 'update-ref', '-d', 'refs/ci-buddy/' + name)
+
+
 def emit(values):
     for key, value in values.items():
         print(f"{key}={shlex.quote(str(value))}")
@@ -56,6 +61,12 @@ def project_config(repository, commit="HEAD"):
     return config
 
 
+def output(out, job):
+    write_file(out / 'job.json', json.dumps(job))
+    for name in ('task', 'slot', 'exit', 'bench-task', 'bench-exit', 'runner.log'):
+        write_file(out / name, '')
+
+
 def make_job(folder, run, kind, commit, base, branch, submitter, argv):
     config = project_config(Path(folder, "git"), commit)
     rerun = kind != "run" and argv[:1] == ["--rerun"]
@@ -82,9 +93,7 @@ def make_job(folder, run, kind, commit, base, branch, submitter, argv):
         revision = read_file(Path(folder).parents[1] / "bin/revision").strip()
         inputs = [kind, job["tree"], argv, base if kind == "test" and not argv else "", revision]
         job["key"] = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
-    write_file(Path(folder, "runs", run, "job.json"), json.dumps(job))
-    for name in ('task', 'slot', 'exit', 'bench-task', 'bench-exit', 'runner.log'):
-        write_file(Path(folder, 'runs', run, name), '')
+    output(Path(folder, 'runs', run), job)
     return job
 
 
@@ -93,8 +102,12 @@ def reuse_finished(folder, run):
     job = json.loads(read_file(out / "job.json"))
     if job["key"] and not job["rerun"]:
         database = history.db(folder)
-        for row in database.execute('SELECT * FROM runs WHERE key=? AND reused_from IS NULL AND exit IS NOT NULL ORDER BY id DESC', (job["key"],)):
+        for row in database.execute('SELECT * FROM runs WHERE key=? AND reused_from IS NULL ORDER BY id DESC', (job["key"],)):
             prior = dict(row)
+            if prior['exit'] is None:
+                if read_file(folder / 'runs' / str(prior['id']) / 'bench-task').strip():
+                    return str(prior['id'])
+                continue
             complete = database.execute("SELECT 1 FROM results JOIN tests ON tests.id=results.test WHERE run=? AND name='phase/bench'", (prior["id"],)).fetchone()
             if job["bench_required"] and prior["exit"] == 0 and not complete:
                 continue
