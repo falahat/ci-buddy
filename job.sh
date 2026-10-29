@@ -26,7 +26,6 @@ finish() {
     python3 "$root/bin/data.py" read "$out/report.txt" || true
     exec 1>&8 2>&8
     wait "$logger"
-    write_field "${prefix}exit" "$status"
 }
 trap finish EXIT
 exec 5>"$root/containers/picker.lock"
@@ -40,7 +39,12 @@ if [[ $exclusive != True ]]; then
         flock -u 7
     fi
 fi
-order=$(python3 "$root/bin/data.py" slots "$folder/git" "$commit" "$slots")
+if [[ -n $prefix ]]; then
+    order=$(python3 "$root/bin/data.py" read "$out/slot")
+    [[ $order =~ ^[1-9][0-9]*$ ]] && ((order <= slots)) || { echo "invalid correctness slot"; exit 1; }
+else
+    order=$(python3 "$root/bin/data.py" slots "$folder/git" "$commit" "$slots")
+fi
 chosen=""
 for slot in $order; do
     mkdir -p "$folder/slots/$slot"
@@ -99,7 +103,7 @@ common=(--rm --init --hostname "$(hostname)" --memory="$memory" --memory-swap="$
     -e "CI_BUDDY_COMMIT=$commit" -e "CI_BUDDY_BASE=$base" -e CI_BUDDY_OUT=/work/out -e CI_BUDDY_DATA=/work/data)
 # data.py creates and validates these controls before enqueue; every project
 # container receives read-only file mounts and cannot replace them.
-for control in job.json task slot exit bench-task bench-exit; do
+for control in job.json task slot exit; do
     common+=(-v "$out/$control:/work/out/$control:ro")
 done
 project_mounts=(-v "$slot/src:/work/src" -v "$root/sccache:/work/sccache" -w /work/src)

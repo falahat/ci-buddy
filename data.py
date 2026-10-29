@@ -83,7 +83,7 @@ def project_config(repository, commit="HEAD"):
 
 def output(out, job):
     write_file(out / 'job.json', json.dumps(job))
-    for name in ('task', 'slot', 'exit', 'bench-task', 'bench-exit', 'runner.log'):
+    for name in ('task', 'slot', 'exit', 'runner.log'):
         write_file(out / name, '')
 
 
@@ -125,28 +125,17 @@ def reuse_finished(folder, run):
         for row in database.execute('SELECT * FROM runs WHERE key=? AND reused_from IS NULL ORDER BY id DESC', (job["key"],)):
             prior = dict(row)
             if prior['exit'] is None:
-                if read_file(folder / 'runs' / str(prior['id']) / 'bench-task').strip():
-                    return str(prior['id'])
-                continue
-            complete = database.execute("SELECT 1 FROM results JOIN tests ON tests.id=results.test WHERE run=? AND name='phase/bench'", (prior["id"],)).fetchone()
-            if job["bench_required"] and prior["exit"] == 0 and not complete:
                 continue
             original = prior["id"]
-            previous_out = folder / 'runs' / str(original)
-            if previous_out.exists() and (not read_file(previous_out / 'exit').strip()
-                    or read_file(previous_out / 'bench-task').strip() and not read_file(previous_out / 'bench-exit').strip()):
-                continue
             prior.update(id=int(run), commit=job["commit"], branch=job["branch"], submitter=job["submitter"],
                          queued_at=job["queued_at"], started_at=time.time(), ended_at=time.time(), cpu_s=0, peak_bytes=None, reused_from=original)
             columns = ','.join('"' + key + '"' for key in prior)
             with database:
                 database.execute(f'INSERT INTO runs ({columns}) VALUES ({",".join("?" for _ in prior)})', tuple(prior.values()))
                 database.execute('INSERT INTO results SELECT test,?,status,ms,excerpt FROM results WHERE run=?', (int(run), original))
-            job.update(reused_from=original, exit=prior["exit"])
+            job.update(reused_from=original, exit=prior["exit"], overall_exit=prior["exit"])
             write_file(out / "job.json", json.dumps(job))
             write_file(out / "exit", str(prior["exit"]))
-            if job["bench_required"]:
-                write_file(out / "bench-exit", str(prior["exit"]))
             previous = folder / "runs" / str(original) / "report.txt"
             report = read_file(previous) if previous.exists() else json.dumps(prior)
             write_file(out / "report.txt", f"reused_from={original}\n{report}")

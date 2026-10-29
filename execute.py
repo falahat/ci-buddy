@@ -1,4 +1,4 @@
-"""One native runner phase; submitted programs only execute inside job.sh."""
+"""One complete native job; submitted programs only execute inside job.sh."""
 import json
 import fcntl
 import os
@@ -34,16 +34,56 @@ def interrupt(signum, frame):
         os.killpg(CHILD.pid, signal.SIGTERM)
 
 
+def run_phase(root, project, run, out, prefix=''):
+    global CHILD
+    CHILD = None
+    if not CANCELLED:
+        CHILD = subprocess.Popen(['bash', str(root / 'bin/job.sh'), str(root), project, run,
+                                  'bench' if prefix else '', str(out)], start_new_session=True)
+        if CANCELLED:
+            interrupt(signal.SIGTERM, None)
+        CHILD.wait()
+    job = json.loads(data.read_file(out / 'job.json'))
+    stage = prefix.replace('-', '_')
+    if stage + 'exit' not in job:
+        status = 137 if CANCELLED else CHILD.returncode if 0 < CHILD.returncode <= 255 else 1
+        job.update({stage + 'exit': status, stage + 'ended_at': time.time()})
+        data.write_file(out / 'job.json', json.dumps(job))
+        data.report(out, prefix)
+    return json.loads(data.read_file(out / 'job.json'))[stage + 'exit']
+
+
+def pipeline(root, project, run, out, work, job):
+    progress = work / 'invoke-progress.json'
+    data.write_file(progress, json.dumps(dict(phase='correctness')))
+    correctness = status = run_phase(root, project, run, out)
+    profiling = correctness == 0 and job['bench_required'] and not CANCELLED
+    if profiling:
+        job = json.loads(data.read_file(out / 'job.json'))
+        job['bench_queued_at'] = time.time()
+        data.write_file(out / 'job.json', json.dumps(job))
+        data.write_file(progress, json.dumps(dict(phase='profiling', correctness_exit=correctness)))
+    print('correctness_exit=' + str(correctness), flush=True)
+    if profiling:
+        status = run_phase(root, project, run, out, 'bench-')
+    status = 137 if CANCELLED else status
+    job = json.loads(data.read_file(out / 'job.json'))
+    job['overall_exit'] = status
+    data.write_file(out / 'job.json', json.dumps(job))
+    data.write_file(progress, json.dumps(dict(phase='complete', correctness_exit=correctness, exit=status)))
+    return status
+
+
 def execute(root, request):
     global CHILD, CURRENT
     invocation = request['invocation']
     if invocation['kind'] != 'invocation/v0' or invocation['op'] != 'command' or invocation['op_version'] != 1:
         raise ValueError('unsupported invocation')
     params = invocation['params']
-    project, run, phase = params['project'], params['run'], params['phase']
+    project, run = params['project'], params['run']
     identity(project, run)
-    if phase not in ('core', 'bench') or params['revision'] != data.read_file(root / 'bin/revision').strip():
-        raise ValueError('execution phase or reviewed revision differs')
+    if params != dict(project=project, run=run, revision=data.read_file(root / 'bin/revision').strip()):
+        raise ValueError('execution parameters or reviewed revision differ')
     work = Path(request['workdir']).resolve()
     if work != Path.cwd().resolve() or request['outputs_dir'] != 'outputs':
         raise ValueError('native work directory differs')
@@ -71,32 +111,10 @@ def execute(root, request):
                 or data.git(repository, 'rev-parse', job['commit'] + '^{tree}') != job['tree']):
             raise ValueError('source bundle differs from canonical job')
         out = folder / 'executions' / run
-        prefix = 'bench-' if phase == 'bench' else ''
-        if phase == 'core':
-            out.mkdir(mode=0o700)
-            data.output(out, job)
-        else:
-            previous = json.loads(data.read_file(out / 'job.json'))
-            if previous['commit'] != job['commit'] or previous.get('exit') != 0:
-                raise ValueError('benchmark has no matching local correctness artifacts')
-            data.write_file(out / 'job.json', json.dumps(job))
-        data.write_file(out / (prefix + 'task'), request['job_id'])
-        if not CANCELLED:
-            CHILD = subprocess.Popen(['bash', str(root / 'bin/job.sh'), str(root), project, run,
-                                      'bench' if phase == 'bench' else '', str(out)], start_new_session=True)
-            if CANCELLED:
-                interrupt(signal.SIGTERM, None)
-            CHILD.wait()
-        if CANCELLED:
-            interrupt(signal.SIGTERM, None)
-        marker = data.read_file(out / (prefix + 'exit')).strip()
-        status = 137 if CANCELLED else int(marker) if marker else (CHILD.returncode if 0 < CHILD.returncode <= 255 else 1)
-        if not marker or CANCELLED:
-            job = json.loads(data.read_file(out / 'job.json'))
-            job.update({prefix.replace('-', '_') + 'exit': status, prefix.replace('-', '_') + 'ended_at': time.time()})
-            data.write_file(out / 'job.json', json.dumps(job))
-            data.report(out, prefix)
-            data.write_file(out / (prefix + 'exit'), str(status))
+        out.mkdir(mode=0o700)
+        data.output(out, job)
+        data.write_file(out / 'task', request['job_id'])
+        status = pipeline(root, project, run, out, work, job)
         destination = work / 'outputs/run.tar.zst'
         destination.parent.mkdir(exist_ok=True)
         subprocess.run([sys.executable, str(root / 'bin/archive.py'), str(out), str(destination)], check=True)

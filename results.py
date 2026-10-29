@@ -55,25 +55,37 @@ def unpack_results(archive_path, destination):
                 shutil.copyfileobj(archive.extractfile(entry), output)
 
 
-def accounting(payload, slot, status, phase='core'):
-    prefix = 'bench_' if phase == 'bench' else ''
-    if not isinstance(payload, dict) or type(payload.get(prefix + 'exit')) is not int or payload[prefix + 'exit'] != status or not 0 <= status <= 255:
-        raise ValueError('worker exit differs from transport')
-    values = {key: payload.get(prefix + key) for key in ('queued_at', 'started_at', 'ended_at', 'cpu_s', 'peak_bytes')}
-    for value in values.values():
-        if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
-            raise ValueError('invalid worker accounting')
-    if (values['queued_at'] is None or values['ended_at'] is None
-            or values['queued_at'] > values['ended_at']
-            or values['started_at'] is not None and not values['queued_at'] <= values['started_at'] <= values['ended_at']
-            or values['peak_bytes'] is not None and type(values['peak_bytes']) is not int
+def accounting(payload, slot, status, bench_required=False):
+    if (not isinstance(payload, dict) or type(status) is not int or not 0 <= status <= 255
+            or type(payload.get('overall_exit')) is not int or payload['overall_exit'] != status
             or slot is not None and (type(slot) is not int or slot < 1)):
-        raise ValueError('invalid worker timestamps or slot')
-    del values['queued_at']
-    return {prefix + key: value for key, value in dict(values, exit=status).items()}
+        raise ValueError('worker exit differs from transport')
+    bench = 'bench_exit' in payload
+    if (bench and (not bench_required or payload.get('exit') != 0)
+            or bench_required and payload.get('exit') == 0 and not bench and status != 137):
+        raise ValueError('worker profiling phase differs from canonical job')
+    result = dict(overall_exit=status)
+    for prefix in ('', 'bench_') if bench else ('',):
+        values = {key: payload.get(prefix + key) for key in ('queued_at', 'started_at', 'ended_at', 'cpu_s', 'peak_bytes', 'exit')}
+        for value in values.values():
+            if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
+                raise ValueError('invalid worker accounting')
+        if (type(values['exit']) is not int or not 0 <= values['exit'] <= 255
+                or values['queued_at'] is None or values['ended_at'] is None
+                or values['queued_at'] > values['ended_at']
+                or values['started_at'] is not None and not values['queued_at'] <= values['started_at'] <= values['ended_at']
+                or values['peak_bytes'] is not None and type(values['peak_bytes']) is not int
+                or prefix and values['queued_at'] < payload['ended_at']):
+            raise ValueError('invalid worker timestamps or slot')
+        if not prefix:
+            del values['queued_at']
+        result.update({prefix + key: value for key, value in values.items()})
+    if status != 137 and status != result['bench_exit' if bench else 'exit']:
+        raise ValueError('worker aggregate exit differs from phase exits')
+    return result
 
 
-def collect(root, project, identifier, action, phase, cancelled=False):
+def collect(root, project, identifier, action, cancelled=False):
     folder = root / 'projects' / project
     out = folder / 'runs' / identifier
     output = action['outputs']['run']
@@ -106,12 +118,11 @@ def collect(root, project, identifier, action, phase, cancelled=False):
         unpack_results(decoded, returned)
         slot_text = data.read_file(returned / 'slot').strip()
         slot = int(slot_text) if slot_text else None
-        values = accounting(json.loads(data.read_file(returned / 'job.json')), slot, status, phase)
-        prefix = 'bench_' if phase == 'bench' else ''
-        values[prefix + 'exit'] = 137 if cancelled else status
         job = json.loads(data.read_file(out / 'job.json'))
+        values = accounting(json.loads(data.read_file(returned / 'job.json')), slot, status, job.get('bench_required', False))
+        values['overall_exit'] = 137 if cancelled else status
         job.update(values)
-        job[prefix + 'node'] = action['runner']['node']
+        job['node'] = action['runner']['node']
         data.write_file(returned / 'job.json', json.dumps(job))
         data.write_file(returned / 'slot', '' if slot is None else str(slot))
         job['junit_ingested_at'] = history.record(folder, returned, data.read_file)
@@ -127,7 +138,7 @@ def collect(root, project, identifier, action, phase, cancelled=False):
         report = out / 'report.txt'
         text = safe_output.clean(data.read_file(report)) if report.exists() else ''
         data.write_file(report, text + ('owner cancellation: exit=137\n' if cancelled else ''))
-        saved = folder / 'logs' / time.strftime('%Y-%m') / (identifier + ('-bench' if phase == 'bench' else '') + '.tar.zst')
+        saved = folder / 'logs' / time.strftime('%Y-%m') / (identifier + '.tar.zst')
         saved.parent.mkdir(parents=True, exist_ok=True)
         compressed.replace(saved)
         for path in out.rglob('junit.xml'):

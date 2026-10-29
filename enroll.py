@@ -65,7 +65,7 @@ def enroll(root, args):
         profiles = []
         for exclusive in (False, True):
             identifier = name + ('-x' if exclusive else '-b')
-            lanes = ','.join((lane(revision, exclusive), lane(revision, exclusive, node)))
+            lanes = lane(revision, exclusive)
             public = dict(NAME=identifier, DISPATCHER_ADDR=info['dispatcher'], CAS_URL=info['cas'], LANES=lanes,
                           RUNNER_NODE=node, WORK_ROOT=str(worker_root / 'dispatch/work'),
                           COUNT='1' if exclusive else str(limits['jobs']), NO_DEADLINE='1',

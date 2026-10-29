@@ -27,8 +27,8 @@ Repeat `--host` for each approved coordinator; `local:<root>`
 uses a local Linux queue without SSH. Endpoints live in the owner's global
 Git configuration (`ci-buddy.host`), outside submitted source. The project's
 `host` is a preference within that allowlist. The client skips unavailable or
-incompatible hosts before submission, then its coordinator picks an available
-warm worker. Use the same reviewed revision everywhere and update explicitly.
+incompatible hosts before submission, then the dispatcher selects an available
+worker, whose executor chooses a warm slot. Use the same reviewed revision everywhere and update explicitly.
 A submission never downloads executable client code from a server.
 
 Invoke `bash "$HOME/.local/bin/ci-buddy"` (or add that directory to PATH):
@@ -42,8 +42,11 @@ starts, a disconnect never causes automatic resubmission.
 A detached HEAD records an empty branch. Candidate refs disappear after checkout
 or when a job ends before checkout, including failed submissions and cancellation.
 
-A green gate queues its optional exclusive bench on the same worker and output folder.
-Correctness returns first. `verify` waits for both and prints their report.
+A gate runs correctness and its optional exclusive profiling in one native job,
+on the same worker and cached slot. The correctness result streams immediately;
+`status` exposes native progress while profiling continues. `gate` and `verify`
+wait for the complete result and fail if either phase fails. Reports keep each
+phase's timings and CPU accounting separate.
 `merge` verifies clean HEAD, rejects a moved main and pushes without forcing.
 Exclusive jobs drain the machine, make data writable and allow CPU/NUMA profiling.
 `gate --exclusive` also serializes correctness for an isolated build measurement.

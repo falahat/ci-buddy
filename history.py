@@ -118,8 +118,7 @@ def record(folder, out, read_file):
         "queued_at", "started_at", "ended_at", "exit", "cpu_s", "peak_bytes", "reused_from")}
     if values["exit"] is None:
         values["exit"] = int(read_file(out / "exit"))
-    if job.get("bench_required") and values["exit"] == 0:
-        values["exit"] = job.get("bench_exit")
+    values["exit"] = job.get("overall_exit", values["exit"])
     values["ended_at"] = job.get("bench_ended_at", values["ended_at"])
     try:
         slot = read_file(out / "slot")

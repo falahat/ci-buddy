@@ -45,7 +45,7 @@ with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(result.stdout, end="", flush=True)
         assert result.returncode == status, (arguments, result.returncode, status)
-        if arguments[0] == "history":
+        if arguments[0] in ("history", "status"):
             owner = tomllib.loads(config.read_text())["host"]
             payload = result.stdout.split("host=" + owner + "\n", 1)[1]
             return json.dumps(json.JSONDecoder().raw_decode(payload.lstrip())[0])
@@ -152,25 +152,26 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
     call("run", "--", "sh", "-c",
          '! printf wrong >"$CI_BUDDY_DATA/probe"; test "$(cat "$CI_BUDDY_DATA/probe")" = readable')
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
-    gate = call("gate", "--rerun")
-    run = run_id(gate)
-    verifying = launch("verify", commit)
+    gate = launch("gate", "--rerun")
+    run = announced(gate, "correctness_exit=0")
     try:
-        assert verifying.stdout.readline().startswith("waiting bench_task=")
-        worker_probe("assert not (out / 'bench-exit').read_text().strip()\n(out / 'release').write_text('release')", run)
-        report = verifying.communicate()[0]
+        assert gate.poll() is None, 'gate returned before profiling completed'
+        task = run_probe("print((out / 'task').read_text())", run).strip()
+        assert any(row['job_id'] == task and row['state'] == 'RUNNING' and row.get('progress') == dict(phase='profiling', correctness_exit=0) for row in json.loads(call('status'))['jobs'])
+        worker_probe("job = json.loads((out / 'job.json').read_text())\nassert job['exit'] == 0 and 'bench_exit' not in job\n(out / 'release').write_text('release')", run)
+        gate.communicate()
     finally:
-        if verifying.poll() is None:
+        if gate.poll() is None:
             call("cancel", run)
-            verifying.communicate()
-    assert verifying.returncode == 0 and "gate green" in report and "bench green " + run in report, report
+            gate.communicate()
+    report = call("verify", commit)
+    assert gate.returncode == 0 and "gate green" in report and "bench green " + run in report, report
     config.write_text("\n".join('gate = "false"' if line.startswith("gate = ") else line
                                 for line in original.splitlines()) + "\n")
     subprocess.run(author + ["commit", "-qam", "red gate"], cwd=source, check=True)
     red = call("gate", status=1)
     run = run_id(red)
-    assert "bench_task=" not in red, red
-    run_probe("assert not (out / 'bench-task').read_text().strip()", run)
+    run_probe("job = json.loads((out / 'job.json').read_text())\nassert job['exit'] == 1 and job['overall_exit'] == 1 and 'bench_exit' not in job", run)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
     call("verify", commit, status=1)
     assert "reused_from=" not in call("test"), "changed tree reused an old result"
@@ -243,7 +244,7 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
         readonly = """import errno,os,sys
 from pathlib import Path
 print('worker-exit-three-once',flush=True)
-for name in ('job.json','task','slot','exit','bench-task','bench-exit'):
+for name in ('job.json','task','slot','exit'):
     try:
         descriptor = os.open(Path(os.environ['CI_BUDDY_OUT']) / name, os.O_WRONLY)
     except OSError as error:

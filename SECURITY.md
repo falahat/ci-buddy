@@ -25,8 +25,8 @@ Roots are owner-only and installation is rootless. A host's queues share its
 machine lock; installing refuses conflicting existing locks. Scheduling lanes
 are not reservations: each execution host enforces its own jobs, slots, disk
 floor and container memory cap. Offline endpoints do not block installation.
-Exclusive work can use any enrolled machine; a gate's benchmark is pinned to its
-correctness worker. The coordinator's app API is an owner-private Unix socket.
+Exclusive work can use any enrolled machine; a gate runs correctness and profiling
+inside one native job on the same worker and cached slot. The coordinator's app API is an owner-private Unix socket.
 Only the authenticated PEP ports are published, on the configured private address;
 dispatcher and CAS backend ports remain inside the rootless pod namespace.
 Each consumer has its own credential, generated on that worker. The trusted
@@ -34,6 +34,8 @@ installed executor launches isolated rootless workload containers; it never give
 them the runner credential, container socket or coordinator issuer key.
 Cancellation retains the lease until cleanup and application persistence finish.
 A crashed worker fails visibly; it is never automatically resubmitted or declared clean.
+Progress comes from the installed executor's private native progress file, outside
+the workload mounts. Workload log text does not establish a successful phase.
 
 Only the trusted installed fetch image receives project secrets. Keep them in
 `projects/NAME/secrets`, directories 0700 and files 0600. The fetch recipe and

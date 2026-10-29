@@ -30,10 +30,10 @@ class WorkerOutput(unittest.TestCase):
         (self.root / 'containers').mkdir()
         self.job = dict(kind='test', key='key', tree='a' * 40, commit='b' * 40,
                         branch='topic', submitter='owner', argv=[], queued_at=1)
-        self.account = dict(queued_at=2, started_at=3, ended_at=4, exit=0,
+        self.account = dict(queued_at=2, started_at=3, ended_at=4, exit=0, overall_exit=0,
                             cpu_s=1.5, peak_bytes=1024)
         (self.out / 'job.json').write_text(json.dumps(self.job))
-        for name in ('slot', 'exit', 'bench-task', 'bench-exit'):
+        for name in ('slot', 'exit'):
             (self.out / name).write_text('')
         (self.out / 'task').write_text('owner-task')
         (self.out / 'runner.log').write_text('coordinator output\n')
@@ -56,6 +56,18 @@ class WorkerOutput(unittest.TestCase):
     def xml(self, duration='0.002', body=''):
         return f'<testsuite><testcase classname="example" name="test" time="{duration}">{body}</testcase></testsuite>'
 
+    def collect_output(self, contents, status=0):
+        archive = self.archive([(name, 0o600, tarfile.REGTYPE, body.encode())
+                                for name, body in contents.items()], unpack=False)
+        compressed = subprocess.check_output(['zstd', '-q', '-c', str(archive)])
+        def transfer(root, operation, address, destination, **options):
+            self.assertEqual(operation, 'get')
+            destination.write_bytes(compressed)
+        action = dict(outputs={'run': dict(address='sha256:' + 'a' * 64, size=len(compressed))},
+                      metrics={'exit': status}, runner={'node': 'native-worker'})
+        with mock.patch.object(results, 'cas', side_effect=transfer):
+            return results.collect(self.root, 'example', '7', action)
+
     def test_protocol_only_and_no_metadata_overwrite(self):
         forged = self.account | dict(id=True, kind='run', key='forged', tree='c' * 40,
                                       commit='c' * 40, branch='other', submitter='other',
@@ -64,16 +76,7 @@ class WorkerOutput(unittest.TestCase):
                     'runner.log': 'forged output', 'task': 'forged-task', 'tool.py': 'raise RuntimeError',
                     'phases.tsv': 'check\t0.25\t1\n', 'check.log': 'phase witness',
                     'junit/ci/junit.xml': self.xml()}
-        archive = self.archive([(name, 0o600, tarfile.REGTYPE, body.encode())
-                                for name, body in contents.items()], unpack=False)
-        compressed = subprocess.check_output(['zstd', '-q', '-c', str(archive)])
-        def transfer(root, operation, address, destination, **options):
-            self.assertEqual(operation, 'get')
-            destination.write_bytes(compressed)
-        action = dict(outputs={'run': dict(address='sha256:' + 'a' * 64, size=len(compressed))},
-                      metrics={'exit': 0}, runner={'node': 'native-worker'})
-        with mock.patch.object(results, 'cas', side_effect=transfer):
-            results.collect(self.root, 'example', '7', action, 'core')
+        self.assertEqual(self.collect_output(contents), 0)
         with closing(history.db(self.folder)) as database:
             row = dict(database.execute('SELECT * FROM runs').fetchone())
             expected = self.job | dict(id=7, argv='[]')
@@ -86,6 +89,28 @@ class WorkerOutput(unittest.TestCase):
         self.assertEqual((self.out / 'runner.log').read_text(), 'coordinator output\n')
         self.assertEqual((self.out / 'report.txt').read_text(), '[31mreport\n')
         self.assertFalse((self.out / 'tool.py').exists())
+
+    def test_failed_profiling_preserves_successful_correctness_accounting(self):
+        self.job.update(kind='gate', bench_required=True)
+        (self.out / 'job.json').write_text(json.dumps(self.job))
+        payload = self.account | dict(overall_exit=1, bench_queued_at=4, bench_started_at=5,
+                                      bench_ended_at=7, bench_exit=1, bench_cpu_s=2.5, bench_peak_bytes=2048)
+        self.assertEqual(self.collect_output({'job.json': json.dumps(payload), 'slot': '1',
+                                             'report.txt': 'correctness green\nprofiling failed\n'}, status=1), 1)
+        saved = json.loads((self.out / 'job.json').read_text())
+        self.assertEqual((saved['exit'], saved['overall_exit'], saved['ended_at'], saved['cpu_s']), (0, 1, 4, 1.5))
+        with closing(history.db(self.folder)) as database:
+            self.assertEqual(database.execute('SELECT exit FROM runs').fetchone()[0], 1)
+            phases = dict((name, (status, ms)) for name, status, ms in database.execute(
+                'SELECT name,status,ms FROM results JOIN tests ON tests.id=results.test'))
+            self.assertEqual(phases['phase/correctness'], ('passed', 1000))
+            self.assertEqual(phases['phase/bench'], ('failed', 2000))
+        for field, value in (('overall_exit', 0), ('bench_exit', True), ('bench_started_at', 3),
+                             ('bench_ended_at', float('nan')), ('bench_cpu_s', -1)):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                results.accounting(payload | {field: value}, 1, 1, True)
+        self.assertRaises(ValueError, results.accounting, payload, 1, 1, False)
+        self.assertRaises(ValueError, results.accounting, self.account, 1, 0, True)
 
     def test_unsafe_archive_entries(self):
         bad = [('../escape', 0o600, tarfile.REGTYPE, 1),
