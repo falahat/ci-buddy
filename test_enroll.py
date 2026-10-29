@@ -1,8 +1,9 @@
-"""Real enrollment payload/registration paths with isolated native installer fixtures."""
+"""Coordinator setup uses the reviewed runtime installer and native command kit."""
 import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -14,102 +15,103 @@ from unittest.mock import patch
 import enroll
 
 
-@unittest.skipUnless(os.name == 'posix', 'the local runner fixture needs Linux')
+@unittest.skipUnless(os.name == 'posix', 'coordinator setup needs Linux')
 class Enrollment(unittest.TestCase):
+    def script(self, path, body):
+        path.write_text('#!' + shutil.which('bash') + '\nset -eu\n' + body)
+        path.chmod(0o700)
+
+    def runtime(self, link=False):
+        path = self.root / 'bin/runtime.tar'
+        with tarfile.open(path, 'w') as archive:
+            item = tarfile.TarInfo('install.sh')
+            body = b'set -eu\ntest "$1" = --root\ntest "$3" = --worker\nmkdir -p "$2/bin"\ncp "$(dirname "$0")/revision" "$2/bin/revision"\n'
+            item.size = len(body)
+            archive.addfile(item, io.BytesIO(body))
+            if link:
+                item = tarfile.TarInfo('unsafe')
+                item.type, item.linkname = tarfile.SYMTYPE, 'install.sh'
+                archive.addfile(item)
+        return path
+
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.addCleanup(os.chdir, Path.cwd())
-        tools = self.root / 'tools'
-        tools.mkdir()
-        record = dict(name='existing', host='local', kind='owned', online=True)
-        (tools / 'tailworker').write_text('import json\nprint(' + repr(json.dumps(record)) + ')\n')
-        commands = {'systemd-escape': "printf 'fixture\\n'\n",
-                    'systemctl': 'printf "%s\\n" "$*" >>"' + str(self.root / 'reloads') + '"\n'
-                                 'find "' + str(self.root) + '" -name fail-reload | grep -q . && exit 7\nexit 0\n'}
-        for name, body in commands.items():
-            service = tools / name
-            service.write_text('#!' + shutil.which('sh') + '\n' + body)
-            service.chmod(0o700)
-        self.enterContext(patch.dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'],
-                                     GIT_CONFIG_GLOBAL=str(self.root / 'owner.gitconfig'), GIT_CONFIG_NOSYSTEM='1'))
-        self.revision = 'a' * 40
-        script = r'''set -eu
-test ! -e "$2/fail-install" || exit 7
-mkdir -p "$2/bin"
-printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$2/bin/revision"
-printf 'cat "$(dirname "$0")/revision"\n' >"$2/bin/ci-buddy"
-printf '1\n' >"$2/capacity"
-test "$3" = --worker
-printf 'installed\n' >>"$2/installs"
-'''
-        archive = io.BytesIO()
-        with tarfile.open(fileobj=archive, mode='w') as bundle:
-            body = script.encode()
-            member = tarfile.TarInfo('install.sh')
-            member.size = len(body)
-            bundle.addfile(member, io.BytesIO(body))
-        self.archive = archive.getvalue()
-        self.conf = '''jobs = 1
-slots = 1
-memory = "1g"
-cpus = "1"
-min_free_gb = 500
-slot_max_gb = 5
-workers = []
-'''
-        config = self.root / 'leaf.conf'
-        config.write_text(self.conf)
         self.leaf = self.root / 'leaf'
-        self.coordinator = 'local:' + str(self.root / 'coordinator')
-        enroll.invoke(self.coordinator, dict(mode='install', revision=self.revision, conf=self.conf), self.archive)
-        subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', self.coordinator], check=True)
-        self.args = types.SimpleNamespace(name='existing', root=str(self.leaf), host_conf=str(config), coordinator=None)
-        self.enterContext(patch.object(enroll, 'runtime', return_value=(self.revision, self.archive)))
-        self.auth = self.enterContext(patch.object(enroll.auth, 'client'))
+        self.endpoint = 'local:' + str(self.leaf)
+        for name in ('bin', 'dispatch', 'kit', 'tools', 'profiles'):
+            (self.root / name).mkdir()
+        self.conf = 'jobs=2\nslots=2\nmemory="1g"\ncpus="1"\nmin_free_gb=500\nslot_max_gb=5\nfetch_hosts=[]\n'
+        (self.root / 'host.conf').write_text(self.conf)
+        (self.root / 'worker.conf').write_text(self.conf)
+        (self.root / 'bin/revision').write_text('a' * 40)
+        shutil.copyfile(Path(enroll.__file__).with_name('install.sh'), self.root / 'bin/install.sh')
+        self.runtime()
+        record = dict(name='existing', host='local', kind='owned', online=True)
+        self.script(self.root / 'tools/tailworker', 'printf "%s\\n" ' + shlex.quote(json.dumps(record)) + '\n')
+        info = dict(dispatcher='100.64.0.1:7300', cas='http://100.64.0.1:7301',
+                    kit=str(self.root / 'kit'), runner=str(self.root / 'runner'), node='coordinator', signer='false')
+        self.script(self.root / 'bin/plane.sh', 'printf "%s\\n" ' + shlex.quote(json.dumps(info)) + '\n')
+        (self.root / 'kit/common.sh').write_text('remote() { test "$1" = local; shift; "$@"; }\n')
+        events = shlex.quote(str(self.root / 'events'))
+        self.script(self.root / 'kit/install-command.sh', 'test "$1" = --env\ncp "$2" ' +
+                    shlex.quote(str(self.root / 'profiles')) + '/"$(basename "$2")"\nprintf "installed\\n" >>' + events + '\n')
+        self.script(self.root / 'kit/enroll-command.sh', 'grep -F ' + shlex.quote(self.endpoint) + ' ' +
+                    shlex.quote(str(self.root / 'host.conf')) + ' >/dev/null\nprintf "start\\n" >>' + events +
+                    '\ntest ! -e ' + shlex.quote(str(self.root / 'fail-start')) + '\n')
+        self.enterContext(patch.dict(os.environ, PATH=str(self.root / 'tools') + os.pathsep + os.environ['PATH']))
+        self.enterContext(patch.object(enroll.auth, 'read', return_value=b'fixture-token'))
+        def token(*arguments):
+            self.assertEqual(arguments, (self.endpoint, 'store', b'fixture-token'))
+            with (self.root / 'events').open('a') as stream:
+                stream.write('token\n')
+        self.token = self.enterContext(patch.object(enroll.auth, 'rpc', side_effect=token))
+        self.args = types.SimpleNamespace(name='existing', root=str(self.leaf), host_conf=str(self.root / 'worker.conf'))
 
-    def routes(self):
-        return subprocess.check_output(['git', 'config', '--global', '--get-all', 'ci-buddy.host']).decode().splitlines()
+    def test_runtime_token_roster_then_native_start(self):
+        enroll.enroll(self.root, self.args)
+        self.assertEqual((self.root / 'events').read_text(), 'installed\ninstalled\ntoken\nstart\nstart\n')
+        self.assertEqual((self.leaf / 'bin/revision').read_text(), 'a' * 40)
+        self.assertEqual(enroll.data.host_config(self.root)['fetch_hosts'], [self.endpoint])
+        profiles = list((self.root / 'profiles').iterdir())
+        self.assertEqual(len(profiles), 2)
+        for profile in profiles:
+            values = dict(shlex.split(line)[0].split('=', 1) for line in profile.read_text().splitlines())
+            exclusive = profile.stem.endswith('-x')
+            self.assertEqual(values['COUNT'], '1' if exclusive else '2')
+            self.assertEqual(shlex.split(values['COMMAND']), [shutil.which('python3'), str(self.leaf / 'bin/execute.py'), str(self.leaf)])
+            self.assertTrue(all(len(lane) <= 32 and lane.startswith('x-' if exclusive else 'b-') for lane in values['LANES'].split(',')))
 
-    def reject(self, error, routes, message=''):
-        self.assertRaisesRegex(error, message, enroll.enroll, self.args)
-        self.assertEqual(self.routes(), routes)
-        self.assertEqual((self.root / 'coordinator/host.conf').read_text(), self.conf)
+    def test_partial_start_retains_fetch_host_for_rotation(self):
+        (self.root / 'fail-start').touch()
+        self.assertRaises(subprocess.CalledProcessError, enroll.enroll, self.root, self.args)
+        self.assertEqual(enroll.data.host_config(self.root)['fetch_hosts'], [self.endpoint])
+        self.assertEqual((self.root / 'events').read_text(), 'installed\ninstalled\ntoken\nstart\n')
 
-    def test_install_then_auth_then_active_registration_and_idempotence(self):
-        endpoint = 'local:' + str(self.leaf)
-        def sync(arguments):
-            self.assertIn(endpoint, self.routes())
-            self.assertTrue((self.leaf / 'bin/revision').is_file())
-            self.assertNotIn(endpoint, (self.root / 'coordinator/host.conf').read_text())
-        self.auth.side_effect = sync
-        enroll.enroll(self.args)
-        self.assertIn(endpoint, (self.root / 'coordinator/host.conf').read_text())
-        self.assertEqual((self.leaf / 'installs').read_text(), 'installed\n')
-        self.auth.side_effect = None
-        enroll.enroll(self.args)
-        self.assertNotIn(endpoint, self.routes())
-        self.assertEqual((self.root / 'coordinator/capacity').read_text(), '2\n')
-        self.assertEqual((self.root / 'reloads').read_text(), '--user reload ci-buddy-dispatch@fixture.service\n')
-        for root in (self.leaf, self.root / 'coordinator'):
-            self.assertEqual((root / 'installs').read_text(), 'installed\n')
-            self.assertFalse(list(root.glob('enroll-*')))
+    def test_token_failure_does_not_register_or_start(self):
+        self.token.side_effect = ValueError('fixture token unavailable')
+        self.assertRaisesRegex(ValueError, 'token unavailable', enroll.enroll, self.root, self.args)
+        self.assertEqual((self.root / 'host.conf').read_text(), self.conf)
+        self.assertEqual((self.root / 'events').read_text(), 'installed\ninstalled\n')
 
-    def test_registration_failure_restores_only_new_route_and_configuration(self):
-        (self.root / 'coordinator/fail-reload').touch()
-        self.reject(subprocess.CalledProcessError, [self.coordinator])
-        self.assertTrue((self.leaf / 'bin/revision').exists())
-        self.assertEqual((self.root / 'coordinator/capacity').read_text(), '1\n')
-        self.assertFalse(list((self.root / 'coordinator').glob('enroll-*')))
-
-    def test_existing_route_survives_auth_failure(self):
-        endpoint = 'local:' + str(self.leaf)
-        subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', endpoint], check=True)
-        self.auth.side_effect = ValueError('fixture credentials unavailable')
-        self.reject(ValueError, [self.coordinator, endpoint], 'credentials unavailable')
-
-    def test_self_dispatch_is_rejected_without_changing_configuration(self):
-        self.args.root = str(self.root / 'coordinator')
-        self.reject(subprocess.CalledProcessError, [self.coordinator])
+    def test_existing_root_and_both_archive_boundaries(self):
+        self.leaf.mkdir(mode=0o700)
+        (self.leaf / 'host.conf').write_text(self.conf)
+        (self.leaf / 'bin').mkdir()
+        (self.leaf / 'bin/revision').write_text('b' * 40)
+        self.assertRaises(subprocess.CalledProcessError, enroll.enroll, self.root, self.args)
+        self.assertEqual((self.leaf / 'bin/revision').read_text(), 'b' * 40)
+        self.runtime(link=True)
+        self.assertRaisesRegex(ValueError, 'links or special', enroll.enroll, self.root, self.args)
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode='w') as archive:
+            archive.add(self.root / 'bin/runtime.tar', arcname='runtime.tar')
+            archive.add(self.root / 'bin/revision', arcname='revision')
+            archive.add(self.root / 'worker.conf', arcname='host.conf')
+        result = subprocess.run(['bash', str(self.root / 'bin/install.sh'), '--root', str(self.root / 'reject'), '--archive'],
+                                input=payload.getvalue(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'reject/bin/revision').exists())
 
 
 if __name__ == '__main__':

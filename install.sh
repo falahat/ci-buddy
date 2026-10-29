@@ -1,22 +1,61 @@
 set -euo pipefail
 umask 077
-target= dispatch_dir= worker=false
+target= dispatch_dir= worker=false archive=false
 while (($#)); do
     case $1 in
         --root) target=${2:?root required}; shift 2 ;;
         --dispatch-dir) dispatch_dir=${2:?reviewed dispatch directory required}; shift 2 ;;
         --worker) worker=true; shift ;;
+        --archive) archive=true; shift ;;
         *) echo 'usage: bash install.sh --root <dir> [--dispatch-dir <reviewed-dir> | --worker]' >&2; exit 2 ;;
     esac
 done
-[[ -n $target && ( $worker == false || -z $dispatch_dir ) ]] || exit 2
+[[ -n $target ]] || exit 2
 [[ $(id -u) != 0 ]] || { echo 'ci-buddy requires a rootless user' >&2; exit 2; }
+if [[ $archive == true ]]; then
+    python3 -I - "$target" 3<&0 <<'PY'
+import fcntl, os, pathlib, shutil, subprocess, sys, tarfile, tempfile, tomllib
+root = pathlib.Path(sys.argv[1]).resolve()
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
+assert root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o077 == 0, 'runner root must be owned and private'
+with (root / 'install.lock').open('a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    with tempfile.TemporaryDirectory(dir=root) as directory:
+        stage = pathlib.Path(directory)
+        with tarfile.open(fileobj=os.fdopen(3, 'rb'), mode='r|') as payload:
+            seen = set()
+            for entry in payload:
+                assert entry.isfile() and not entry.issparse() and entry.size <= 16 * 1024 * 1024
+                assert entry.name in {'runtime.tar', 'host.conf', 'revision'} - seen, 'invalid installer payload'
+                seen.add(entry.name)
+                payload.extract(entry, stage, filter='data')
+        assert seen == {'runtime.tar', 'host.conf', 'revision'}, 'incomplete installer payload'
+        source = stage / 'source'
+        source.mkdir()
+        with tarfile.open(stage / 'runtime.tar') as runtime:
+            assert all(entry.isfile() or entry.isdir() for entry in runtime), 'runtime contains links or special files'
+            runtime.extractall(source, filter='data')
+        revision = (stage / 'revision').read_text().strip()
+        conf = stage / 'host.conf'
+        if (root / 'host.conf').exists():
+            assert (root / 'bin/revision').read_text().strip() == revision, 'update the existing runtime explicitly'
+            assert tomllib.loads((root / 'host.conf').read_text()) == tomllib.loads(conf.read_text()), 'existing host.conf differs'
+        else:
+            assert {path.name for path in root.iterdir()} == {'install.lock', stage.name}, 'runner root is not empty'
+            shutil.copyfile(conf, root / 'host.conf')
+        for name in ('runtime.tar', 'revision'):
+            shutil.copyfile(stage / name, source / name)
+        subprocess.run(['bash', str(source / 'install.sh'), '--root', str(root), '--worker'], check=True)
+PY
+    exit
+fi
 for tool in podman git python3 zstd systemctl systemd-escape; do command -v "$tool"; done
 source_dir=$(cd "$(dirname "$0")" && pwd -P)
-[[ -f $target/host.conf ]] || { echo 'ci-buddy: write <root>/host.conf with jobs, slots, memory, cpus, min_free_gb, slot_max_gb and workers before installing' >&2; exit 2; }
+[[ -f $target/host.conf ]] || { echo 'ci-buddy: write <root>/host.conf with jobs, slots, memory, cpus, min_free_gb, slot_max_gb and fetch_hosts before installing' >&2; exit 2; }
 root=$(cd "$target" && pwd -P)
 # Reuse keys need the installed revision even when staging omits Git metadata.
 if [[ -e $source_dir/.git ]]; then
+    [[ -z $(git -C "$source_dir" status --porcelain) ]] || { echo "install committed reviewed source" >&2; exit 2; }
     revision=$(git -C "$source_dir" rev-parse --verify HEAD)
 elif [[ -f $source_dir/revision ]]; then
     revision=$(<"$source_dir/revision")
@@ -24,27 +63,17 @@ else
     echo 'ci-buddy: install from its Git checkout or provide a staging revision file' >&2; exit 2
 fi
 [[ $revision =~ ^[0-9a-f]{40}$ ]] || { echo 'ci-buddy: invalid installed revision' >&2; exit 2; }
-python3 - "$root" "$source_dir" "$worker" <<'PY'
+python3 -I - "$root" "$source_dir" "$worker" <<'PY'
 import json, os, pathlib, shutil, stat, subprocess, sys, tomllib
 root = pathlib.Path(sys.argv[1])
+if subprocess.run(['git', '-C', str(root), 'rev-parse', '--show-toplevel'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    raise SystemExit('ci-buddy: keep runner state and credentials outside repositories')
 if root.stat().st_uid != os.getuid():
     raise SystemExit('ci-buddy: root must belong to the installing user')
 root.chmod(0o700)
-limits = tomllib.loads((root / 'host.conf').read_text())
-required = {'jobs', 'slots', 'memory', 'cpus', 'min_free_gb', 'slot_max_gb', 'workers'}
-missing = required - limits.keys()
-if missing:
-    raise SystemExit('ci-buddy: host.conf requires ' + ', '.join(sorted(missing)))
-if limits.keys() - required - {'keep_days'}:
-    raise SystemExit('ci-buddy: unknown host.conf settings')
-for name in ('jobs', 'slots', 'min_free_gb', 'slot_max_gb', 'keep_days'):
-    value = limits.get(name, 90) if name == 'keep_days' else limits[name]
-    if type(value) is not int or value <= 0:
-        raise SystemExit(f'ci-buddy: {name} must be a positive integer')
-if not isinstance(limits['memory'], str) or not limits['memory'].strip() or not isinstance(limits['cpus'], str):
-    raise SystemExit('ci-buddy: memory and cpus must be strings; only cpus may be empty')
-if not isinstance(limits['workers'], list) or any(not isinstance(endpoint, str) or ':' not in endpoint for endpoint in limits['workers']):
-    raise SystemExit('ci-buddy: workers must be an array of destination:root strings')
+sys.path.insert(0, sys.argv[2])
+import data
+limits = data.host_config(root)
 if shutil.disk_usage(root).free < limits['min_free_gb'] * 10**9:
     raise SystemExit('ci-buddy: free disk is below min_free_gb')
 for directory in ('bin', 'containers', 'cargo', 'sccache', 'projects', 'dispatch'):
@@ -65,7 +94,7 @@ units = config_home / 'systemd' / 'user'
 units.mkdir(parents=True, exist_ok=True)
 instance = subprocess.check_output(['systemd-escape', '--path', str(root)], text=True).strip()
 for template in pathlib.Path(sys.argv[2], 'units').iterdir():
-    if sys.argv[3] == 'true' and template.name.startswith('ci-buddy-dispatch'):
+    if sys.argv[3] == 'true' and template.name.startswith('ci-buddy-collect'):
         continue
     # Exact instance files leave every other root's template and units alone.
     shutil.copyfile(template, units / template.name.replace('@.', '@' + instance + '.'))
@@ -88,7 +117,7 @@ PY
 [[ $(podman info --format '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}') == 'true v2' ]] || {
     echo 'ci-buddy requires rootless Podman with cgroup v2' >&2; exit 2;
 }
-for file in ci-buddy control.py execute.py data.py history.py archive.py workers.py safe_output.py ssh.py auth.py fetch.Containerfile fetch.sh job.sh upkeep.sh; do
+for file in ci-buddy control.py execute.py data.py history.py archive.py results.py safe_output.py ssh.py auth.py enroll.py install.sh plane.sh fetch.Containerfile fetch.sh job.sh upkeep.sh; do
     cp "$source_dir/$file" "$root/bin/$file.new"
     chmod +x "$root/bin/$file.new"
     mv "$root/bin/$file.new" "$root/bin/$file"
@@ -98,35 +127,15 @@ mv "$root/bin/revision.new" "$root/bin/revision"
 touch "$root/machine.lock" "$root/turnstile"
 instance=$(systemd-escape --path "$root")
 if [[ $worker == false ]]; then
-    if [[ -n $dispatch_dir ]]; then
-        [[ -x $dispatch_dir/dispatch-local && -f $dispatch_dir/dispatch_client/__init__.py ]] || exit 2
-        cp "$dispatch_dir/dispatch-local" "$root/bin/dispatch-local.new"
-        chmod 700 "$root/bin/dispatch-local.new"
-        mv "$root/bin/dispatch-local.new" "$root/bin/dispatch-local"
-        cp -R "$dispatch_dir/dispatch_client" "$root/bin/"
-    fi
-    [[ -x $root/bin/dispatch-local && -f $root/bin/dispatch_client/__init__.py ]] || {
-        echo 'ci-buddy: provide the reviewed local dispatch artifact with --dispatch-dir' >&2; exit 2;
+    [[ -n $dispatch_dir && -x $dispatch_dir/runner && -f $dispatch_dir/dispatch_client/__init__.py && -f $dispatch_dir/kit/install-command.sh ]] || {
+        echo 'ci-buddy: provide the reviewed runner, Python client and shared kit with --dispatch-dir' >&2; exit 2;
     }
-    cat >"$root/dispatch.toml" <<'TOML'
-heartbeat_interval_s = 1
-lease_ttl_s = 30
-runner_rate_per_min = 0
-sweep_interval_s = 1
-[default_lane]
-single_attempt = true
-[lanes.exclusive]
-concurrency = 1
-single_attempt = true
-TOML
-    python3 - "$root" <<'PY'
-from pathlib import Path
-import sys, tomllib
-root = Path(sys.argv[1])
-limits = tomllib.loads((root / 'host.conf').read_text())
-(root / 'capacity').write_text(str(limits['jobs'] * (1 + len(limits['workers']))) + '\n')
-PY
+    install -m 700 "$dispatch_dir/runner" "$root/bin/runner"
+    cp -R "$dispatch_dir/dispatch_client" "$root/bin/"
+    mkdir -p "$root/dispatch/kit"
+    cp -R "$dispatch_dir/kit/." "$root/dispatch/kit/"
 fi
+if [[ -e $source_dir/.git ]]; then git -C "$source_dir" archive --format=tar HEAD >"$root/bin/runtime.tar"
+else cp "$source_dir/runtime.tar" "$root/bin/runtime.tar"; fi
 systemctl --user daemon-reload
 systemctl --user enable --now "ci-buddy-upkeep@$instance.timer"
-if [[ $worker == false ]]; then systemctl --user enable --now "ci-buddy-dispatch@$instance.service"; fi

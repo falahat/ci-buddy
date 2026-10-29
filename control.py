@@ -25,8 +25,8 @@ def client(root):
 
 
 def lane(revision, exclusive=False, node=None):
-    value = ('exclusive_' if exclusive else 'build_') + revision[:12]
-    return value + ('_' + hashlib.sha256(node.encode()).hexdigest()[:12] if node else '')
+    value = ('x-' if exclusive else 'b-') + revision[:12]
+    return value + ('-' + hashlib.sha256(node.encode()).hexdigest()[:12] if node else '')
 
 
 def invocation(root, address=None, value=None):

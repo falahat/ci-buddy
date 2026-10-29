@@ -49,6 +49,26 @@ def write_file(path, content):
     temporary.replace(path)
 
 
+def host_config(root):
+    config = tomllib.loads((root / 'host.conf').read_text())
+    required = {'jobs', 'slots', 'memory', 'cpus', 'min_free_gb', 'slot_max_gb', 'fetch_hosts'}
+    missing = required - config.keys()
+    if missing:
+        raise ValueError('host.conf requires ' + ', '.join(sorted(missing)))
+    if config.keys() - required - {'keep_days'}:
+        raise ValueError('unknown host.conf settings')
+    for name in ('jobs', 'slots', 'min_free_gb', 'slot_max_gb', 'keep_days'):
+        value = config.get(name, 90) if name == 'keep_days' else config[name]
+        if type(value) is not int or value <= 0:
+            raise ValueError(f'{name} must be a positive integer')
+    if not isinstance(config['memory'], str) or not config['memory'].strip() or not isinstance(config['cpus'], str):
+        raise ValueError('memory and cpus must be strings; only cpus may be empty')
+    if not isinstance(config['fetch_hosts'], list) or any(not isinstance(endpoint, str) or ':' not in endpoint for endpoint in config['fetch_hosts']):
+        raise ValueError('fetch_hosts must be an array of destination:root strings')
+    config.setdefault('keep_days', 90)
+    return config
+
+
 def project_config(repository, commit="HEAD"):
     config = tomllib.loads(git(repository, "show", commit + ":ci-buddy.toml"))
     allowed = {"name", "host", "main", "image", "prepare", "wrapper", "gate", "test", "bench"}
@@ -207,11 +227,7 @@ def main():
     elif command == "write":
         write_file(Path(args[0]), args[1] + "\n")
     elif command == "host":
-        config = tomllib.loads(Path(args[0], "host.conf").read_text())
-        allowed = {"jobs", "slots", "memory", "cpus", "min_free_gb", "slot_max_gb", "keep_days", "workers"}
-        if config.keys() - allowed:
-            raise ValueError(f"unknown host settings: {config.keys() - allowed}")
-        config.setdefault("keep_days", 90)
+        config = host_config(Path(args[0]))
         emit({key: config[key] for key in ("jobs", "slots", "memory", "cpus", "min_free_gb", "slot_max_gb", "keep_days")})
     elif command == "record":
         print(f"history_bytes={record(Path(args[0]))}")
