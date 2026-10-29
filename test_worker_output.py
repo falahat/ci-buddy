@@ -30,9 +30,9 @@ class WorkerOutput(unittest.TestCase):
         self.out = self.artifacts / 'out'
         for path in (self.step, self.out, self.root / 'containers'):
             path.mkdir(parents=True)
-        self.job = dict(kind='gate', key='a' * 64, tree='a' * 40, commit='b' * 40, base='c' * 40,
+        self.job = dict(key='a' * 64, tree='a' * 40, commit='b' * 40, base='c' * 40,
                         branch='topic', submitter='owner', rerun=False, queued_at=1,
-                        steps=[dict(name='correctness', kind='gate', exclusive=False, argv=[],
+                        steps=[dict(kind='gate', exclusive=False, argv=[],
                                     queued_at=1, started_at=2, ended_at=4, exit=0, phases=[['command', 2]])], exit=0)
         for name in ('fetch-stats', 'stats'):
             (self.step / name).write_text('usage_usec 750000\nmemory_peak_bytes=1024\noom_kill 0\n')
@@ -62,7 +62,7 @@ class WorkerOutput(unittest.TestCase):
         (self.out / 'phases.tsv').write_text('fmt.all\t0.25\t1\n')
         (self.out / 'fmt.all.log').write_text('x' * 5000)
         value = self.normalize()
-        self.assertTrue(set(results.PLAN[1:]).isdisjoint(value['steps'][0]))
+        self.assertTrue(set(results.PLAN).isdisjoint(value['steps'][0]))
         self.assertEqual(self.collect(value), 0)
         folder = self.root / 'projects/example'
         with closing(history.db(folder)) as database:
@@ -76,7 +76,7 @@ class WorkerOutput(unittest.TestCase):
         self.assertNotIn('\x1b', value['report'])
 
     def test_profiling_failure_keeps_correctness_accounting(self):
-        self.job['steps'].append(dict(name='profiling', kind='bench', exclusive=True, argv=[],
+        self.job['steps'].append(dict(kind='bench', exclusive=True, argv=[],
                                       queued_at=4, started_at=5, ended_at=7, exit=1, phases=[]))
         self.job['exit'] = 1
         value = self.normalize()
@@ -108,7 +108,7 @@ class WorkerOutput(unittest.TestCase):
         for field, value in (('queued_at', 1), ('queued_at', 'nan'), ('rerun', 0), ('branch', 'x' * 65537)):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 results.spec(params | dict(job=job | {field: value}), 'd' * 40)
-        job.update(kind='run', key='')
+        job['key'] = ''
         job['steps'][0]['kind'] = 'run'
         for argv in ([], [False], ['nul\0value'], ['x' * 65537], ['x'] * 4097):
             job['steps'][0]['argv'] = argv

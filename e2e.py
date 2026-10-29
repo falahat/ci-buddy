@@ -180,8 +180,9 @@ assert control.history.run(project,sys.argv[2])['exit'] is None""", rejected)
     call("verify", commit, status=1)
     assert "reused_from=" not in call("test"), "changed tree reused an old result"
 
-    # An exclusive holder keeps these queued workers from blocking other exclusives.
+    # One exclusive holder and blocked consumers fill the shared native pool.
     count = int(run_probe("print(tomllib.loads((root / 'host.conf').read_text())['jobs'])").strip())
+    assert count >= 2, 'E2E needs two consumers to cover active blocked cancellation'
     barrier = launch("run", "--exclusive", "--", "python3", "-c",
                      "import signal; print('holder-ready',flush=True); signal.pause()")
     barrier_run = announced(barrier, "holder-ready")
@@ -189,7 +190,7 @@ assert control.history.run(project,sys.argv[2])['exit'] is None""", rejected)
     queued = None
     twins = []
     try:
-        for _ in range(count):
+        for _ in range(count - 1):
             holder = launch("run", "--", "true")
             holders.append((holder, announced(holder)))
         queued = launch("run", "--", "true")

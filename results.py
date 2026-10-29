@@ -19,7 +19,7 @@ HISTORY_LIMIT = history.HISTORY_LIMIT
 FILE_LIMIT = 4096
 TEST_LIMIT = 100000
 MAX_NUMBER = 2**63 - 1
-PLAN = ('name', 'kind', 'exclusive', 'argv')
+PLAN = ('kind', 'exclusive', 'argv')
 TIMING = ('queued_at', 'started_at', 'ended_at', 'cpu_s', 'peak_bytes', 'cap_killed')
 
 
@@ -42,12 +42,12 @@ def spec(params, revision, project=None):
     if size > HISTORY_LIMIT:
         raise ValueError('canonical job arguments exceed the 16 MiB metadata limit')
     job = params['job']
-    fields = {'kind', 'commit', 'base', 'tree', 'branch', 'submitter', 'key', 'rerun', 'queued_at', 'steps'}
+    fields = {'commit', 'base', 'tree', 'branch', 'submitter', 'key', 'rerun', 'queued_at', 'steps'}
     if (not isinstance(job, dict) or set(job) != fields
             or any(not isinstance(job[key], str) or len(job[key]) > 65536 or '\0' in job[key] for key in fields - {'rerun', 'steps'})
-            or job['kind'] not in ('run', 'test', 'gate', 'bench') or type(job['rerun']) is not bool
+            or type(job['rerun']) is not bool
             or any(not re.fullmatch(r'[0-9a-f]{40}', job[key]) for key in ('commit', 'base', 'tree'))
-            or not re.fullmatch(r'[0-9a-f]{64}|', job['key']) or (job['kind'] == 'run') != (job['key'] == '')
+            or not re.fullmatch(r'[0-9a-f]{64}|', job['key'])
             or not re.fullmatch(r'(0|[1-9][0-9]*)(\.[0-9]+)?', job['queued_at'])
             or not isinstance(job['steps'], list) or not 1 <= len(job['steps']) <= 2):
         raise ValueError('invalid canonical job fields')
@@ -55,18 +55,18 @@ def spec(params, revision, project=None):
     if not math.isfinite(queued):
         raise ValueError('invalid canonical queue timestamp')
     for step in job['steps']:
-        if not isinstance(step, dict) or set(step) != set(PLAN) or type(step['exclusive']) is not bool:
+        if (not isinstance(step, dict) or set(step) != set(PLAN) or type(step['exclusive']) is not bool
+                or step['kind'] not in ('run', 'test', 'gate', 'bench')):
             raise ValueError('invalid canonical step fields')
         arguments(step['argv'])
     first = job['steps'][0]
-    if job['kind'] == 'run' and not first['argv']:
+    kind = first['kind']
+    if kind == 'run' and not first['argv']:
         raise ValueError('run requires a command')
-    if (first['kind'] != job['kind']
-            or first['name'] != ('profiling' if job['kind'] == 'bench' else 'correctness')
-            or job['kind'] == 'bench' and not first['exclusive'] or job['kind'] == 'test' and first['exclusive']
-            or job['kind'] == 'run' and job['rerun']
-            or job['kind'] in ('gate', 'bench') and first['argv']
-            or len(job['steps']) == 2 and (job['kind'] != 'gate' or job['steps'][1] != dict(name='profiling', kind='bench', exclusive=True, argv=[]))):
+    if ((kind == 'run') != (job['key'] == '')
+            or kind == 'bench' and not first['exclusive'] or kind == 'test' and first['exclusive']
+            or kind == 'run' and job['rerun'] or kind in ('gate', 'bench') and first['argv']
+            or len(job['steps']) == 2 and (kind != 'gate' or job['steps'][1] != dict(kind='bench', exclusive=True, argv=[]))):
         raise ValueError('canonical steps differ from the selected alias')
     return params['project'], dict(job, queued_at=queued)
 
@@ -136,7 +136,7 @@ def validate(value, job, identifier, status):
     previous = job['queued_at']
     for index, step in enumerate(value['steps']):
         if (not isinstance(step, dict) or set(step) != set(('name',) + TIMING + ('exit', 'phases'))
-                or step['name'] != job['steps'][index]['name']
+                or step['name'] != data.step_name(job['steps'][index]['kind'])
                 or not (step['exit'] is None and status == 137 or type(step['exit']) is int and 0 <= step['exit'] <= 255)
                 or not isinstance(step['phases'], list) or len(step['phases']) > 4096):
             raise ValueError('normalized step differs from canonical plan')
@@ -182,11 +182,9 @@ def normalize(artifacts, job, identifier, slot):
     for planned in job['steps']:
         if 'exit' not in planned:
             break
-        name = planned['name']
-        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', name):
-            raise ValueError('invalid step name')
+        name = data.step_name(planned['kind'])
         out = artifacts / 'steps' / name
-        step = {key: planned.get(key) for key in ('name',) + TIMING + ('exit',)}
+        step = dict(name=name, **{key: planned.get(key) for key in TIMING + ('exit',)})
         step['phases'] = planned.get('phases', [])
         totals = []
         for field in ('fetch-stats', 'prepare-stats', 'stats'):
@@ -236,7 +234,7 @@ def normalize(artifacts, job, identifier, slot):
                         for node in [*failed, *case.findall('system-err'), *case.findall('system-out')]) if failed else None
                     tests.add(case.attrib['classname'] + '::' + case.attrib['name'], status, round(seconds * 1000),
                               text.encode()[:4096].decode(errors='ignore') if text is not None else None)
-    if job['kind'] == 'test':
+    if job['steps'][0]['kind'] == 'test':
         counts = []
         for filename in ('all-tests.json', 'selected-tests.json'):
             try:

@@ -23,11 +23,11 @@ class NativeCI(unittest.TestCase):
         (self.root / 'containers').mkdir()
         (self.root / 'bin/revision').write_text('a' * 40)
         (self.root / 'host.conf').write_text('jobs=1\nslots=1\nmemory="1g"\ncpus="1"\nmin_free_gb=500\nslot_max_gb=5\nfetch_hosts=[]\n')
-        self.job = dict(kind='gate', key='a' * 64, rerun=False, queued_at=1, branch='topic', submitter='owner',
+        self.job = dict(key='a' * 64, rerun=False, queued_at=1, branch='topic', submitter='owner',
                         commit='b' * 40, base='c' * 40, tree='d' * 40,
-                        steps=[dict(name='correctness', kind='gate', exclusive=False, argv=[]),
-                               dict(name='profiling', kind='bench', exclusive=True, argv=[])])
-        self.view = dict(job_id=ID, job_key='example/' + 'a' * 64, lane='b-' + 'a' * 12,
+                        steps=[dict(kind='gate', exclusive=False, argv=[]),
+                               dict(kind='bench', exclusive=True, argv=[])])
+        self.view = dict(job_id=ID, job_key='example/' + 'a' * 64, lane='ci-' + 'a' * 12,
                          invocation_address='sha256:invocation', state='RUNNING', cancel_requested=False)
         self.spec = dict(kind='invocation/v0', op='command', op_version=1,
                          params=dict(project='example', revision='a' * 40, job=dict(self.job, queued_at='1')),
@@ -49,7 +49,7 @@ class NativeCI(unittest.TestCase):
 
     def test_native_identity_source_revision_and_lane_are_bound(self):
         self.assertEqual(control.context(self.root, self.view, 'example'), ('example', self.job))
-        for key, value in (('job_id', '123'), ('job_key', 'other/key'), ('lane', 'x-' + 'a' * 12)):
+        for key, value in (('job_id', '123'), ('job_key', 'other/key'), ('lane', 'ci-' + 'e' * 12)):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 control.context(self.root, self.view | {key: value}, 'example')
         self.spec['params']['revision'] = 'e' * 40

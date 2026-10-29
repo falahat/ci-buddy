@@ -58,19 +58,15 @@ def enroll(root, args):
             payload.seek(0)
             subprocess.run(remote + ['bash', '-c', data.read_file(root / 'bin/install.sh'), '_',
                                      '--root', args.root, '--archive'], stdin=payload, check=True)
-        profiles = []
-        for exclusive in (False, True):
-            identifier = name + ('-x' if exclusive else '-b')
-            lanes = lane(revision, exclusive)
-            public = dict(NAME=identifier, DISPATCHER_ADDR=info['dispatcher'], CAS_URL=info['cas'], LANES=lanes,
-                          RUNNER_NODE=node, WORK_ROOT=str(worker_root / 'dispatch/work'),
-                          COUNT='1' if exclusive else str(limits['jobs']), NO_DEADLINE='1',
-                          COMMAND=shlex.join([python, str(worker_root / 'bin/execute.py'), args.root]))
-            environment = stage / (identifier + '.env')
-            environment.write_text(''.join(key + '=' + shlex.quote(value) + '\n' for key, value in public.items()))
-            subprocess.run(['bash', str(kit / 'install.sh'), '--env', str(environment),
-                            '--machine', args.name, '--runner', info['runner']], check=True)
-            profiles.append((identifier, lanes))
+        lanes = lane(revision)
+        public = dict(NAME=name, DISPATCHER_ADDR=info['dispatcher'], CAS_URL=info['cas'], LANES=lanes,
+                      RUNNER_NODE=node, WORK_ROOT=str(worker_root / 'dispatch/work'),
+                      COUNT=str(limits['jobs']), NO_DEADLINE='1',
+                      COMMAND=shlex.join([python, str(worker_root / 'bin/execute.py'), args.root]))
+        environment = stage / (name + '.env')
+        environment.write_text(''.join(key + '=' + shlex.quote(value) + '\n' for key, value in public.items()))
+        subprocess.run(['bash', str(kit / 'install.sh'), '--env', str(environment),
+                        '--machine', args.name, '--runner', info['runner']], check=True)
         endpoint = machine['host'] + ':' + args.root
         with data.open_file(root / 'dispatch/enroll.lock', 'a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -81,10 +77,9 @@ def enroll(root, args):
             if endpoint not in config['fetch_hosts']:
                 config['fetch_hosts'].append(endpoint)
                 data.write_file(root / 'host.conf', ''.join(key + ' = ' + json.dumps(value) + '\n' for key, value in config.items()))
-        for identifier, lanes in profiles:
-            signer = info['signer'] + ' --lanes ' + shlex.quote(lanes)
-            subprocess.run(['bash', str(kit / 'enroll.sh'), '--name', identifier, '--machine', args.name,
-                            '--signer', signer, '--note', identifier + ' ' + args.name], check=True)
+        signer = info['signer'] + ' --lanes ' + shlex.quote(lanes)
+        subprocess.run(['bash', str(kit / 'enroll.sh'), '--name', name, '--machine', args.name,
+                        '--signer', signer, '--note', name + ' ' + args.name], check=True)
     instance = subprocess.check_output(['systemd-escape', '--path', str(root)], text=True).strip()
     subprocess.run(['systemctl', '--user', 'enable', '--now', 'ci-buddy-collect@' + instance + '.service'], check=True)
     print('enrolled=' + args.name + ' node=' + node)

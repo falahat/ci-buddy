@@ -51,15 +51,15 @@ def host_config(root):
         raise ValueError('host.conf requires ' + ', '.join(sorted(missing)))
     if config.keys() - required - {'keep_days'}:
         raise ValueError('unknown host.conf settings')
+    config.setdefault('keep_days', 90)
     for name in ('jobs', 'slots', 'min_free_gb', 'slot_max_gb', 'keep_days'):
-        value = config.get(name, 90) if name == 'keep_days' else config[name]
+        value = config[name]
         if type(value) is not int or value <= 0:
             raise ValueError(f'{name} must be a positive integer')
     if not isinstance(config['memory'], str) or not config['memory'].strip() or not isinstance(config['cpus'], str):
         raise ValueError('memory and cpus must be strings; only cpus may be empty')
     if not isinstance(config['fetch_hosts'], list) or any(not isinstance(endpoint, str) or ':' not in endpoint for endpoint in config['fetch_hosts']):
         raise ValueError('fetch_hosts must be an array of destination:root strings')
-    config.setdefault('keep_days', 90)
     return config
 
 
@@ -73,6 +73,10 @@ def project_config(repository, commit="HEAD"):
             if not isinstance(config[name], str) or not config[name].strip():
                 raise ValueError(f"{name} requires a nonempty command")
     return config
+
+
+def step_name(kind):
+    return {"run": "correctness", "test": "correctness", "gate": "correctness", "bench": "profiling"}[kind]
 
 
 def make_job(folder, kind, commit, base, branch, submitter, argv):
@@ -89,13 +93,12 @@ def make_job(folder, kind, commit, base, branch, submitter, argv):
         argv = argv[1:]
     if kind in ("gate", "bench") and kind not in config:
         raise ValueError(f"{kind} requires its configured command")
-    job = dict(kind=kind, commit=commit, base=base, branch=branch, submitter=submitter,
+    job = dict(commit=commit, base=base, branch=branch, submitter=submitter,
                tree=git(Path(folder, "git"), "rev-parse", commit + "^{tree}"),
                key="", rerun=rerun, queued_at=time.time(),
-               steps=[dict(name="profiling" if kind == "bench" else "correctness",
-                           kind=kind, exclusive=exclusive, argv=argv)])
+               steps=[dict(kind=kind, exclusive=exclusive, argv=argv)])
     if kind == "gate" and "bench" in config:
-        job["steps"].append(dict(name="profiling", kind="bench", exclusive=True, argv=[]))
+        job["steps"].append(dict(kind="bench", exclusive=True, argv=[]))
     if kind != "run":
         revision = read_file(Path(folder).parents[1] / "bin/revision").strip()
         inputs = [kind, job["tree"], argv, exclusive, base if kind == "test" and not argv else "", revision]

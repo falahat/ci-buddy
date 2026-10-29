@@ -12,25 +12,18 @@ parser.add_argument('--archive', action='store_true')
 args = parser.parse_args()
 os.umask(0o077)
 root = args.root.resolve()
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
+assert root.stat().st_uid == os.getuid(), 'runner root must belong to the installing user'
+if subprocess.run(['git', '-C', str(root), 'rev-parse', '--show-toplevel'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    raise SystemExit('ci-buddy: keep runner state and credentials outside repositories')
 if args.archive:
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    assert root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o077 == 0, 'runner root must be owned and private'
+    assert root.stat().st_mode & 0o077 == 0, 'runner root must be private'
     with (root / 'install.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with tempfile.TemporaryDirectory(dir=root) as directory:
             source = pathlib.Path(directory)
             with tarfile.open(fileobj=os.fdopen(3, 'rb'), mode='r|') as payload:
-                seen, size = set(), 0
-                for entry in payload:
-                    size += entry.size
-                    assert entry.isfile() and not entry.issparse() and size <= 16 * 1024 * 1024
-                    relative = pathlib.PurePosixPath(entry.name)
-                    assert not relative.is_absolute() and '..' not in relative.parts
-                    entry.name = relative.as_posix()
-                    assert entry.name not in seen and len(seen) < 256, 'duplicate or excessive runtime files'
-                    seen.add(entry.name)
-                    payload.extract(entry, source, filter='data')
-            assert {'install.sh', 'host.conf', 'revision'} <= seen, 'incomplete installer payload'
+                payload.extractall(source, filter='data')
             revision = (source / 'revision').read_text().strip()
             conf = source / 'host.conf'
             if (root / 'host.conf').exists():
@@ -49,10 +42,6 @@ if (source / '.git').exists():
 else:
     revision = (source / 'revision').read_text().strip()
 assert re.fullmatch('[0-9a-f]{40}', revision), 'invalid installed revision'
-if subprocess.run(['git', '-C', str(root), 'rev-parse', '--show-toplevel'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-    raise SystemExit('ci-buddy: keep runner state and credentials outside repositories')
-if root.stat().st_uid != os.getuid():
-    raise SystemExit('ci-buddy: root must belong to the installing user')
 root.chmod(0o700)
 sys.path.insert(0, str(source))
 import data

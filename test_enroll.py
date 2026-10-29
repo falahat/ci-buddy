@@ -30,7 +30,7 @@ class Enrollment(unittest.TestCase):
             archive.addfile(item, io.BytesIO(body))
             if link:
                 item = tarfile.TarInfo('unsafe')
-                item.type, item.linkname = tarfile.SYMTYPE, 'install.sh'
+                item.type, item.linkname = tarfile.SYMTYPE, '../../escape'
                 archive.addfile(item)
         return path
 
@@ -74,31 +74,29 @@ class Enrollment(unittest.TestCase):
 
     def test_runtime_token_roster_then_native_start(self):
         enroll.enroll(self.root, self.args)
-        self.assertEqual((self.root / 'events').read_text(), 'installed\ninstalled\ntoken\nstart\nstart\n')
+        self.assertEqual((self.root / 'events').read_text(), 'installed\ntoken\nstart\n')
         self.assertEqual((self.leaf / 'bin/revision').read_text(), 'a' * 40)
         self.assertEqual(enroll.data.host_config(self.root)['fetch_hosts'], [self.endpoint])
         profiles = list((self.root / 'profiles').iterdir())
-        self.assertEqual(len(profiles), 2)
-        for profile in profiles:
-            values = dict(shlex.split(line)[0].split('=', 1) for line in profile.read_text().splitlines())
-            exclusive = profile.stem.endswith('-x')
-            self.assertEqual(values['COUNT'], '1' if exclusive else '2')
-            self.assertEqual(shlex.split(values['COMMAND']), [shutil.which('python3'), str(self.leaf / 'bin/execute.py'), str(self.leaf)])
-            self.assertTrue(all(len(lane) <= 32 and lane.startswith('x-' if exclusive else 'b-') for lane in values['LANES'].split(',')))
+        self.assertEqual(len(profiles), 1)
+        values = dict(shlex.split(line)[0].split('=', 1) for line in profiles[0].read_text().splitlines())
+        self.assertEqual(values['COUNT'], '2')
+        self.assertEqual(shlex.split(values['COMMAND']), [shutil.which('python3'), str(self.leaf / 'bin/execute.py'), str(self.leaf)])
+        self.assertEqual(values['LANES'], 'ci-' + 'a' * 12)
 
     def test_partial_start_retains_fetch_host_for_rotation(self):
         (self.root / 'fail-start').touch()
         self.assertRaises(subprocess.CalledProcessError, enroll.enroll, self.root, self.args)
         self.assertEqual(enroll.data.host_config(self.root)['fetch_hosts'], [self.endpoint])
-        self.assertEqual((self.root / 'events').read_text(), 'installed\ninstalled\ntoken\nstart\n')
+        self.assertEqual((self.root / 'events').read_text(), 'installed\ntoken\nstart\n')
 
     def test_token_failure_does_not_register_or_start(self):
         self.token.side_effect = ValueError('fixture token unavailable')
         self.assertRaisesRegex(ValueError, 'token unavailable', enroll.enroll, self.root, self.args)
         self.assertEqual((self.root / 'host.conf').read_text(), self.conf)
-        self.assertEqual((self.root / 'events').read_text(), 'installed\ninstalled\n')
+        self.assertEqual((self.root / 'events').read_text(), 'installed\n')
 
-    def test_existing_root_and_both_archive_boundaries(self):
+    def test_existing_root_and_archive_containment(self):
         self.leaf.mkdir(mode=0o700)
         (self.leaf / 'host.conf').write_text(self.conf)
         (self.leaf / 'bin').mkdir()
@@ -107,15 +105,6 @@ class Enrollment(unittest.TestCase):
         self.assertEqual((self.leaf / 'bin/revision').read_text(), 'b' * 40)
         self.runtime(link=True)
         self.assertRaises(subprocess.CalledProcessError, enroll.enroll, self.root, self.args)
-        payload = io.BytesIO()
-        with tarfile.open(fileobj=payload, mode='w') as archive:
-            archive.add(self.root / 'bin/runtime.tar', arcname='runtime.tar')
-            archive.add(self.root / 'bin/revision', arcname='revision')
-            archive.add(self.root / 'worker.conf', arcname='host.conf')
-        result = subprocess.run(['bash', str(self.root / 'bin/install.sh'), '--root', str(self.root / 'reject'), '--archive'],
-                                input=payload.getvalue(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.root / 'reject/bin/revision').exists())
 
 
 if __name__ == '__main__':

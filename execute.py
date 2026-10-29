@@ -137,7 +137,7 @@ def choose_slot(root, folder, job, limits):
 def run_step(root, project, identifier, work, job, index, slot, slot_fd):
     step = job['steps'][index]
     folder, out = root / 'projects' / project, work / 'artifacts/out'
-    raw = work / 'artifacts/steps' / step['name']
+    raw = work / 'artifacts/steps' / data.step_name(step['kind'])
     raw.mkdir(parents=True)
     limits = data.host_config(root)
     with data.open_file((root / 'turnstile').resolve(), 'a') as turnstile, \
@@ -229,28 +229,27 @@ def run_step(root, project, identifier, work, job, index, slot, slot_fd):
 
 def pipeline(root, project, identifier, work, job):
     progress = work / 'invoke-progress.json'
-    correctness, announced = None, False
+    correctness = None
     with choose_slot(root, root / 'projects' / project, job, data.host_config(root)) as (slot, slot_fd):
         for index, step in enumerate(job['steps']):
             step['queued_at'] = job['queued_at'] if index == 0 else time.time()
-            value = dict(phase=step['name'])
+            value = dict(phase=data.step_name(step['kind']))
             if correctness is not None:
                 value['correctness_exit'] = correctness
             data.write_file(progress, json.dumps(value))
             if correctness is not None:
                 print('correctness_exit=' + str(correctness), flush=True)
-                announced = True
             try:
                 run_step(root, project, identifier, work, job, index, slot, slot_fd)
                 step['exit'] = 0
             except subprocess.CalledProcessError as error:
                 step['exit'] = error.returncode
             step['ended_at'] = time.time()
-            if step['name'] == 'correctness':
+            if step['kind'] != 'bench':
                 correctness = step['exit']
             if step['exit'] or CANCELLED:
                 break
-    if correctness is not None and not announced:
+    if correctness is not None and index == 0:
         print('correctness_exit=' + str(correctness), flush=True)
     job['exit'] = 137 if KILLED else step['exit']
     data.write_file(progress, json.dumps(dict(phase='complete', correctness_exit=correctness, exit=job['exit'])))

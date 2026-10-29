@@ -97,9 +97,10 @@ history remains after log expiry and worker cleanup.
 Enroll an existing approved tailworker with
 `ci-buddy enroll NAME --root DIRECTORY --host-conf FILE`. The coordinator installs
 its reviewed executor and uses dispatch-service's shared kit to create unique native
-worker credentials. Normal consumers and one exclusive consumer use revision-scoped
-lanes. The dispatcher chooses an available consumer; its executor chooses a warm
-slot. There is no SSH job transport, automatic job retry or cloud provisioning.
+worker credentials. One revision-scoped lane serves all commands with `jobs` consumers.
+The dispatcher chooses an available consumer; its executor chooses a warm slot and
+enforces machine exclusivity. There is no SSH job transport, automatic job retry or
+cloud provisioning.
 Inspect partial setup before repeating enrollment; fetch_hosts governs token rotation.
 Workers stay disabled until the owner verifies tailworker's [network denials](SECURITY.md).
 Test candidates in a separate installed root while the shared root runs main:

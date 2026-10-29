@@ -52,8 +52,8 @@ def run(folder, identifier):
 
 def record(folder, identifier, job, result, **metadata):
     steps = result['steps']
-    values = {key: job.get(key) for key in ('kind', 'key', 'tree', 'commit', 'branch', 'submitter', 'queued_at')}
-    values.update(id=identifier, argv=json.dumps(job['steps'][0]['argv']), slot=result['slot'], exit=result['exit'],
+    values = {key: job.get(key) for key in ('key', 'tree', 'commit', 'branch', 'submitter', 'queued_at')}
+    values.update(id=identifier, kind=job['steps'][0]['kind'], argv=json.dumps(job['steps'][0]['argv']), slot=result['slot'], exit=result['exit'],
                   started_at=steps[0].get('started_at') if steps else None,
                   ended_at=steps[-1]['ended_at'] if steps else None,
                   document=json.dumps(dict(job=job, result=result, **metadata)))

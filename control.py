@@ -20,8 +20,8 @@ def client(root):
     return DispatchClient('unix:' + str(root / 'dispatch/app.sock'), retry_requests=False)
 
 
-def lane(revision, exclusive=False):
-    return ('x-' if exclusive else 'b-') + revision[:12]
+def lane(revision):
+    return 'ci-' + revision[:12]
 
 
 def blob(root, address=None, value=None):
@@ -46,7 +46,7 @@ def context(root, view, project=None):
             or spec['inputs'].keys() != {'source'}):
         raise ValueError('native invocation differs from reviewed project')
     key = job['key'] if job['key'] and not job['rerun'] else view['invocation_address']
-    if view['job_key'] != name + '/' + key or view['lane'] != lane(revision, job['steps'][0]['exclusive']):
+    if view['job_key'] != name + '/' + key or view['lane'] != lane(revision):
         raise ValueError('native cache identity or lane differs')
     return name, job
 
@@ -73,7 +73,7 @@ def enqueue(root, project, nonce, job):
     with client(root) as queue:
         try:
             answer = queue.enqueue([dict(job_key=project + '/' + key, submission_key=submission,
-                lane=lane(revision, job['steps'][0]['exclusive']), invocation_address=address,
+                lane=lane(revision), invocation_address=address,
                 policy=dict(max_attempts=1))])[0]
         except Exception:
             return queue.lookup(submission)
