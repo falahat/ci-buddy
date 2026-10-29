@@ -51,7 +51,7 @@ class Enrollment(unittest.TestCase):
                     kit=str(self.root / 'kit'), runner=str(self.root / 'runner'), node='coordinator', signer='false')
         self.script(self.root / 'bin/plane.sh', 'printf "%s\\n" ' + shlex.quote(json.dumps(info)) + '\n')
         (self.root / 'kit/common.sh').write_text('remote() { test "$1" = local; shift; "$@"; }\n')
-        self.script(self.root / 'tools/systemd-escape', 'printf \"fixture-root\\n\"\n')
+        self.script(self.root / 'tools/systemd-escape', 'printf "fixture-root\\n"\n')
         self.script(self.root / 'tools/systemctl', 'test "$2" = enable\n')
         events = shlex.quote(str(self.root / 'events'))
         self.script(self.root / 'kit/install.sh', 'test "$1" = --env\ncp "$2" ' +

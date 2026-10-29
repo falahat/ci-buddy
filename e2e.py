@@ -142,7 +142,7 @@ def document():
         running.communicate()
     assert running.returncode != 0
     call("cancel", run)
-    worker_probe("with Path(" + repr(slot + '/lock') + ").open('r+') as lock:\n    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)", run)
+    worker_probe("with Path(" + repr(str(Path(slot) / 'lock')) + ").open('r+') as lock:\n    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)", run)
     call("run", "--", "printf", "slot-released\\n")
 
     # A rejected output link must leave the host-side data canary unchanged.
