@@ -18,7 +18,7 @@ class Fixture(unittest.TestCase):
         (self.root / 'bin/revision').write_text('a' * 40)
         self.out = self.root / 'projects/example/runs/101'
         self.job = dict(kind='gate', key='same-tree', rerun=False, exclusive=False,
-                        bench_required=False, commit='b' * 40, base='c' * 40, tree='d' * 40,
+                        bench_required=True, commit='b' * 40, base='c' * 40, tree='d' * 40,
                         branch='fixture', submitter='owner', argv=[], queued_at=1)
         control.data.output(self.out, self.job)
 
@@ -119,7 +119,6 @@ class Pipeline(Fixture):
     def gate(self, core_exit, bench_exit):
         work = self.root / 'containers'
         phases, output = [], io.StringIO()
-        self.job['bench_required'] = True
         def phase(root, project, run, out, prefix=''):
             phases.append(json.loads((work / 'invoke-progress.json').read_text()))
             job = json.loads((out / 'job.json').read_text())
