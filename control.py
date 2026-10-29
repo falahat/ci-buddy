@@ -39,6 +39,71 @@ def invocation(root, address=None, value=None):
         return json.loads(data.read_file(path))
 
 
+def job_key(project, run, job, phase):
+    if phase == 'bench':
+        return '/'.join((project, run, phase))
+    return project + '/' + (job['key'] if job['key'] and not job['rerun'] else run)
+
+
+def native_job(root, view, project, run, phase, job, spec=None):
+    spec = invocation(root, address=view['invocation_address']) if spec is None else spec
+    revision = data.read_file(root / 'bin/revision').strip()
+    expected = dict(project=project, run=run, phase=phase, revision=revision)
+    node = job.get('node') if phase == 'bench' else None
+    if (spec.get('kind') != 'invocation/v0' or spec.get('op') != 'command'
+            or spec.get('op_version') != 1 or spec.get('params') != expected
+            or view['job_key'] != job_key(project, run, job, phase)
+            or phase == 'bench' and (not isinstance(node, str) or not node)
+            or 'lane' in view and view['lane'] != lane(revision, phase == 'bench' or job['exclusive'], node)):
+        raise ValueError('native invocation differs from canonical run')
+    return spec
+
+
+def find_task(root, queue, project, run, phase, job):
+    key = job_key(project, run, job, phase)
+    matches, page = {}, None
+    while True:
+        response = queue.jobs(filter={'job_key_prefix': key}, page=page)
+        for view in response['jobs']:
+            if view['job_key'] != key:
+                continue
+            spec = invocation(root, address=view['invocation_address'])
+            if spec['params']['run'] != run:
+                continue
+            native_job(root, dict(view, lane=view['lane']), project, run, phase, job, spec)
+            matches[view['job_id']] = view
+        following = response.get('next_page')
+        if following is None:
+            break
+        if type(following) is not int or following <= (page or 0):
+            raise ValueError('invalid native job page')
+        page = following
+    if len(matches) != 1:
+        raise ValueError('native submission missing or ambiguous; execution unconfirmed')
+    return next(iter(matches))
+
+
+def publish_task(out, prefix, task):
+    previous = data.read_file(out / (prefix + 'task')).strip()
+    if not isinstance(task, str) or not task or previous and previous != task:
+        raise ValueError('completion task differs from canonical run')
+    if not previous:
+        data.write_file(out / (prefix + 'task'), task)
+
+
+def task_for(root, queue, out, prefix):
+    project, run = out.parents[1].name, out.name
+    phase = 'bench' if prefix else 'core'
+    job = json.loads(data.read_file(out / 'job.json'))
+    task = data.read_file(out / (prefix + 'task')).strip()
+    if task:
+        native_job(root, queue.job(task), project, run, phase, job)
+    else:
+        task = find_task(root, queue, project, run, phase, job)
+        publish_task(out, prefix, task)
+    return task
+
+
 def enqueue(root, project, run, phase='core', node=None, source=None):
     folder = root / 'projects' / project
     out = folder / 'runs' / run
@@ -60,19 +125,23 @@ def enqueue(root, project, run, phase='core', node=None, source=None):
                   job=dict(address=results.cas(root, 'put', out / 'job.json'), kind='blob'))
     address = invocation(root, value=dict(kind='invocation/v0', op='command', op_version=1,
                          params=dict(project=project, run=run, phase=phase, revision=revision), inputs=inputs))
-    key = project + '/' + (job['key'] if job['key'] and not job['rerun'] else run)
-    if phase == 'bench':
-        key = '/'.join((project, run, 'bench'))
     with client(root) as queue:
-        answer = queue.enqueue([dict(job_key=key,
-                    lane=lane(revision, phase == 'bench' or job['exclusive'], node),
-                    invocation_address=address, policy=dict(max_attempts=1))])[0]
+        try:
+            answer = queue.enqueue([dict(job_key=job_key(project, run, job, phase),
+                        lane=lane(revision, phase == 'bench' or job['exclusive'], node),
+                        invocation_address=address, policy=dict(max_attempts=1))])[0]
+        except Exception:
+            return find_task(root, queue, project, run, phase, job), run
         if answer['created']:
             return answer['job_id'], run
-        prior = invocation(root, address=queue.job(answer['job_id'])['invocation_address'])['params']
+        view = queue.job(answer['job_id'])
+        spec = invocation(root, address=view['invocation_address'])
+        prior = spec['params']
         identity(prior['project'], prior['run'])
-        if prior['project'] != project or prior['phase'] != phase:
+        if prior['project'] != project or view['job_key'] != job_key(project, run, job, phase):
             raise ValueError('native deduplication returned another execution')
+        previous = json.loads(data.read_file(folder / 'runs' / prior['run'] / 'job.json'))
+        native_job(root, view, project, prior['run'], phase, previous, spec)
         return answer['job_id'], prior['run']
 
 
@@ -89,16 +158,51 @@ def recover(out, prefix, reason):
 
 def wait_run(root, project, run, prefix=''):
     out = root / 'projects' / project / 'runs' / run
-    task = data.read_file(out / (prefix + 'task')).strip()
-    if task:
-        with client(root) as queue:
-            view = queue.wait(task)
+    with client(root) as queue:
+        with data.open_file(out.parents[1] / 'submit.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not data.read_file(out / (prefix + 'task')).strip() and data.read_file(out / (prefix + 'exit')).strip():
+                return int(data.read_file(out / (prefix + 'exit')))
+            task = task_for(root, queue, out, prefix)
+        settled(out, prefix, queue.wait(task))
+    return int(data.read_file(out / (prefix + 'exit')))
+
+
+def settled(out, prefix, view):
+    with data.open_file(out.parents[1] / 'submit.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
         marker = data.read_file(out / (prefix + 'exit')).strip()
         if not marker or view['state'] != 'SUCCEEDED' and marker == '0':
-            with data.open_file(out.parents[1] / 'submit.lock', 'a') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                recover(out, prefix, view['state'])
-    return int(data.read_file(out / (prefix + 'exit')))
+            recover(out, prefix, view['state'])
+
+
+def cancel(root, project, run):
+    out = root / 'projects' / project / 'runs' / run
+    confirmed = True
+    for prefix in ('', 'bench-'):
+        try:
+            with client(root) as queue:
+                with data.open_file(out.parents[1] / 'submit.lock', 'a') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    job = json.loads(data.read_file(out / 'job.json'))
+                    if prefix and not job.get('bench_submission_started') and not data.read_file(out / 'bench-task').strip():
+                        continue
+                    try:
+                        task = task_for(root, queue, out, prefix)
+                    except ValueError:
+                        if not data.read_file(out / (prefix + 'task')).strip() and not data.read_file(out / (prefix + 'exit')).strip():
+                            recover(out, prefix, 'native identity unresolved; cancellation unconfirmed')
+                        raise
+                    if queue.job(task)['state'] not in ('CANCELLED', 'SUCCEEDED', 'FAILED'):
+                        queue.cancel(task, reason='owner cancellation')
+                view = queue.wait(task)
+                settled(out, prefix, view)
+                if view['state'] not in ('CANCELLED', 'SUCCEEDED'):
+                    raise ValueError('native state ' + view['state'])
+        except Exception as error:
+            confirmed = False
+            print('cancellation unconfirmed: ' + str(error), file=sys.stderr)
+    return 0 if confirmed else 1
 
 
 def logs(root, task, wait=True):
@@ -130,42 +234,53 @@ def collect(root):
     with client(root) as queue:
         for completion in queue.completions():
             task = completion['job_id']
-            view = queue.job(task)
-            action = completion['action_result']
-            if action['kind'] != 'action_result/v0' or action['invocation_address'] != view['invocation_address']:
-                raise ValueError('native completion identity differs')
-            spec = invocation(root, address=view['invocation_address'])
-            params = spec['params']
-            project, run, phase = params['project'], params['run'], params['phase']
-            identity(project, run)
-            if phase not in ('core', 'bench') or params['revision'] != data.read_file(root / 'bin/revision').strip():
-                raise ValueError('completion phase or reviewed revision differs')
-            out = root / 'projects' / project / 'runs' / run
-            prefix = 'bench-' if phase == 'bench' else ''
-            with data.open_file(out.parents[1] / 'submit.lock', 'a') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                if data.read_file(out / (prefix + 'task')).strip() != task:
-                    raise ValueError('completion task differs from canonical run')
-                if not data.read_file(out / (prefix + 'exit')).strip():
-                    try:
+            bound = False
+            disposition = 'persisted'
+            try:
+                view = queue.job(task)
+                action = completion['action_result']
+                if (action['kind'] != 'action_result/v0' or action['invocation_address'] != view['invocation_address']
+                        or completion['job_key'] != view['job_key']):
+                    raise ValueError('native completion identity differs')
+                spec = invocation(root, address=view['invocation_address'])
+                params = spec['params']
+                project, run, phase = params['project'], params['run'], params['phase']
+                identity(project, run)
+                if phase not in ('core', 'bench'):
+                    raise ValueError('completion phase differs')
+                out = root / 'projects' / project / 'runs' / run
+                prefix = 'bench-' if phase == 'bench' else ''
+                with data.open_file(out.parents[1] / 'submit.lock', 'a') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    job = json.loads(data.read_file(out / 'job.json'))
+                    native_job(root, dict(view, lane=completion['lane']), project, run, phase, job, spec)
+                    publish_task(out, prefix, task)
+                    bound = True
+                    if not data.read_file(out / (prefix + 'exit')).strip():
                         status = results.collect(root, project, run, action, phase, queue.job(task)['cancel_requested'])
                         job = json.loads(data.read_file(out / 'job.json'))
                         if phase == 'core' and status == 0 and job['bench_required'] and not data.read_file(out / 'bench-task').strip():
                             if job.get('bench_submission_started'):
-                                raise ValueError('benchmark submission is ambiguous; inspect its native job key')
-                            job['bench_queued_at'] = time.time()
-                            job['bench_submission_started'] = True
-                            data.write_file(out / 'job.json', json.dumps(job))
-                            bench, original = enqueue(root, project, run, 'bench', action['runner']['node'], spec['inputs']['source']['address'])
-                            if original != run:
-                                raise ValueError('benchmark deduplication returned another run')
-                            data.write_file(out / 'bench-task', bench)
+                                bench = find_task(root, queue, project, run, 'bench', job)
+                            else:
+                                job['bench_queued_at'] = time.time()
+                                job['bench_submission_started'] = True
+                                data.write_file(out / 'job.json', json.dumps(job))
+                                bench, original = enqueue(root, project, run, 'bench', action['runner']['node'], spec['inputs']['source']['address'])
+                                if original != run:
+                                    raise ValueError('benchmark deduplication returned another run')
+                            publish_task(out, 'bench-', bench)
                         data.write_file(out / (prefix + 'exit'), str(status))
-                    except (OSError, ValueError, KeyError, ET.ParseError, subprocess.CalledProcessError) as error:
-                        recover(out, prefix, type(error).__name__)
-                        queue.ack(task, 'rejected', reason='invalid or incomplete CI result')
-                        continue
-                queue.ack(task, 'persisted')
+            except (OSError, ValueError, KeyError, TypeError, ET.ParseError, subprocess.CalledProcessError) as error:
+                print('native completion rejected: ' + task + ': ' + str(error), file=sys.stderr)
+                # Never mutate another run on identity failure, or poison the inbox.
+                if bound:
+                    with data.open_file(out.parents[1] / 'submit.lock', 'a') as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX)
+                        if data.read_file(out / (prefix + 'task')).strip() == task and not data.read_file(out / (prefix + 'exit')).strip():
+                            recover(out, prefix, str(error))
+                disposition = 'rejected'
+            queue.ack(task, disposition, reason='invalid or incomplete CI result' if disposition == 'rejected' else None)
 
 
 def main():
@@ -214,8 +329,10 @@ def main():
                     run = original
                     out = folder / 'runs' / run
                     print('reused_from=' + run, flush=True)
-                else:
-                    data.write_file(out / 'task', task)
+                if not task:
+                    with client(root) as queue:
+                        task = task_for(root, queue, out, '')
+                publish_task(out, '', task)
             print('run=' + run + ' task=' + task, flush=True)
             logs(root, task)
             status = wait_run(root, project, run)
@@ -254,20 +371,14 @@ def main():
             print(json.dumps(view))
     elif command == 'history':
         history.query(folder, args)
-    elif command in ('log', 'cancel'):
+    elif command == 'cancel':
+        return cancel(root, project, args[0])
+    elif command == 'log':
         out = folder / 'runs' / args[0]
         for prefix in ('', 'bench-'):
-            with data.open_file(folder / 'submit.lock', 'a') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                task = data.read_file(out / (prefix + 'task')).strip()
-                if command == 'cancel' and task and not data.read_file(out / (prefix + 'exit')).strip():
-                    with client(root) as queue:
-                        queue.cancel(task, reason='owner cancellation')
+            task = data.read_file(out / (prefix + 'task')).strip()
             if task:
-                if command == 'log':
-                    logs(root, task, wait=False)
-                else:
-                    wait_run(root, project, args[0], prefix)
+                logs(root, task, wait=False)
     else:
         raise ValueError('unknown server command')
     return 0
