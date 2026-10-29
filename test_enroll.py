@@ -48,17 +48,16 @@ class Enrollment(unittest.TestCase):
         self.script(self.root / 'tools/id', 'test "$1" = -u\nprintf "1000\\n"\n')
         self.script(self.root / 'tools/tailworker', 'printf "%s\\n" ' + shlex.quote(json.dumps(record)) + '\n')
         info = dict(dispatcher='100.64.0.1:7300', cas='http://100.64.0.1:7301',
-                    kit=str(self.root / 'kit'), runner=str(self.root / 'runner'), node='coordinator', signer='false')
+                    kit=str(self.root / 'kit'), runner=str(self.root / 'runner'), client='dispatcher-client', signer='false')
         self.script(self.root / 'bin/plane.sh', 'printf "%s\\n" ' + shlex.quote(json.dumps(info)) + '\n')
         (self.root / 'kit/common.sh').write_text('remote() { test "$1" = local; shift; "$@"; }\n')
         self.script(self.root / 'tools/systemd-escape', 'printf "fixture-root\\n"\n')
         self.script(self.root / 'tools/systemctl', 'test "$2" = enable\n')
         events = shlex.quote(str(self.root / 'events'))
-        self.script(self.root / 'kit/install.sh', 'test "$1" = --env\ncp "$2" ' +
-                    shlex.quote(str(self.root / 'profiles')) + '/"$(basename "$2")"\nprintf "installed\\n" >>' + events + '\n')
-        self.script(self.root / 'kit/enroll.sh', 'grep -Fq ' + shlex.quote(self.endpoint) + ' ' +
+        self.script(self.root / 'kit/worker.sh', 'test "$1" = apply\nshift\ntest "$1" = --env\ncp "$2" ' +
+                    shlex.quote(str(self.root / 'profiles')) + '/"$(basename "$2")"\ngrep -Fq ' + shlex.quote(self.endpoint) + ' ' +
                     shlex.quote(str(self.root / 'host.conf')) + '\nprintf "start\\n" >>' + events +
-                    '\ntest ! -e ' + shlex.quote(str(self.root / 'fail-start')) + '\n')
+                    '\ntest "${8}" = dispatcher-client\ntest ! -e ' + shlex.quote(str(self.root / 'fail-start')) + '\n')
         self.enterContext(patch.dict(os.environ, PATH=str(self.root / 'tools') + os.pathsep + os.environ['PATH']))
         self.enterContext(patch.object(enroll.auth, 'read', return_value=b'fixture-token'))
         def token(*arguments):
@@ -70,7 +69,7 @@ class Enrollment(unittest.TestCase):
 
     def test_runtime_token_roster_then_native_start(self):
         enroll.enroll(self.root, self.args)
-        self.assertEqual((self.root / 'events').read_text(), 'installed\ntoken\nstart\n')
+        self.assertEqual((self.root / 'events').read_text(), 'token\nstart\n')
         self.assertEqual((self.leaf / 'bin/revision').read_text(), 'a' * 40)
         self.assertEqual(enroll.data.host_config(self.root)['fetch_hosts'], [self.endpoint])
         profiles = list((self.root / 'profiles').iterdir())
@@ -84,13 +83,13 @@ class Enrollment(unittest.TestCase):
         (self.root / 'fail-start').touch()
         self.assertRaises(subprocess.CalledProcessError, enroll.enroll, self.root, self.args)
         self.assertEqual(enroll.data.host_config(self.root)['fetch_hosts'], [self.endpoint])
-        self.assertEqual((self.root / 'events').read_text(), 'installed\ntoken\nstart\n')
+        self.assertEqual((self.root / 'events').read_text(), 'token\nstart\n')
 
     def test_token_failure_does_not_register_or_start(self):
         self.token.side_effect = ValueError('fixture token unavailable')
         self.assertRaisesRegex(ValueError, 'token unavailable', enroll.enroll, self.root, self.args)
         self.assertEqual((self.root / 'host.conf').read_text(), self.conf)
-        self.assertEqual((self.root / 'events').read_text(), 'installed\n')
+        self.assertFalse((self.root / 'events').exists())
 
     def test_existing_root_and_archive_containment(self):
         self.leaf.mkdir(mode=0o700)

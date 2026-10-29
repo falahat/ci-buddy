@@ -100,8 +100,9 @@ history remains after log expiry and worker cleanup.
 
 Enroll an existing approved tailworker with
 `ci-buddy enroll NAME --root DIRECTORY --host-conf FILE`. The coordinator installs
-its reviewed executor and uses dispatch-service's shared kit to create unique native
-worker credentials. One revision-scoped lane serves all commands with `jobs` consumers.
+its reviewed executor and fetch access, then delegates worker installation, enrollment,
+resume and health checks to dispatch-service's `worker.sh apply`. One revision-scoped
+lane serves all commands with `jobs` consumers.
 The dispatcher chooses an available consumer; its executor chooses a warm slot and
 enforces machine exclusivity. There is no SSH job transport, automatic job retry or
 cloud provisioning.

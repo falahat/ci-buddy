@@ -61,8 +61,6 @@ def enroll(root, args):
                       COMMAND=shlex.join([python, str(worker_root / 'bin/execute.py'), args.root]))
         environment = stage / (name + '.env')
         environment.write_text(''.join(key + '=' + shlex.quote(value) + '\n' for key, value in public.items()))
-        subprocess.run(['bash', str(kit / 'install.sh'), '--env', str(environment),
-                        '--machine', args.name, '--runner', info['runner']], check=True)
         endpoint = machine['host'] + ':' + args.root
         with data.open_file(root / 'dispatch/enroll.lock', 'a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -74,8 +72,9 @@ def enroll(root, args):
                 config['fetch_hosts'].append(endpoint)
                 data.write_file(root / 'host.conf', ''.join(key + ' = ' + json.dumps(value) + '\n' for key, value in config.items()))
         signer = info['signer'] + ' --lanes ' + shlex.quote(lanes)
-        subprocess.run(['bash', str(kit / 'enroll.sh'), '--name', name, '--machine', args.name,
-                        '--signer', signer, '--note', name + ' ' + args.name], check=True)
+        subprocess.run(['bash', str(kit / 'worker.sh'), 'apply', '--env', str(environment), '--machine', args.name,
+                        '--runner', info['runner'], '--client', info['client'], '--signer', signer,
+                        '--note', name + ' ' + args.name], check=True)
     instance = subprocess.check_output(['systemd-escape', '--path', str(root)], text=True).strip()
     subprocess.run(['systemctl', '--user', 'enable', '--now', 'ci-buddy-collect@' + instance + '.service'], check=True)
     print('enrolled=' + args.name + ' node=' + node)
