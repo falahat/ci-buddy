@@ -47,6 +47,11 @@ class Credentials(unittest.TestCase):
         new = self.host('new')
         self.assertRaises(ValueError, auth.client, ['local:' + str(new), endpoint])
         self.assertFalse((new / 'github-token').exists())
+        subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', 'local:' + str(new)], check=True)
+        with patch('getpass.getpass') as prompt, self.assertRaisesRegex(ValueError, 'exactly one coordinator'):
+            auth.client([])
+        prompt.assert_not_called()
+        subprocess.run(['git', 'config', '--global', '--replace-all', 'ci-buddy.host', endpoint], check=True)
         (coordinator / 'host.conf').write_text('fetch_hosts = ' + repr(['local:' + str(worker), 'local:' + str(new)]) + '\n')
         auth.install(coordinator, self.token)
         self.assertEqual(auth.read(new), self.token)
@@ -72,6 +77,14 @@ class Credentials(unittest.TestCase):
         self.assertRaises(OSError, auth.read, root)
         for endpoint in ('public:/work/path\nbad', 'local:relative', '-option:/tmp'):
             self.assertRaises(ValueError, auth.rpc, endpoint, 'store', self.token)
+        configuration = root / 'ssh_config'
+        configuration.write_text('Host fixture\n')
+        configuration.chmod(0o600)
+        with patch.object(auth.ssh, '__file__', str(root / 'bin/ssh.py')), \
+                patch.object(auth.ssh.subprocess, 'check_output', return_value='["ssh", "fixture"]') as resolve:
+            self.assertEqual(auth.ssh.command('fixture', 'printf exact'), ['ssh', 'fixture', 'printf exact'])
+        self.assertEqual(resolve.call_args.args[0], ['bash', '-c', 'exec tailworker ssh-argv "$@"', '_',
+                                                  'fixture', '--config', str(configuration)])
         owned = self.host('.ci-buddy')
         submitted = self.root / 'submitted'
         malicious = submitted / '.ci-buddy' / 'bin'

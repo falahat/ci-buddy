@@ -1,24 +1,11 @@
-"""Private SSH transport. Never impose a deadline on a submitted command."""
-import ipaddress
+"""Pinned private SSH argv belongs to the installed tailworker transport."""
+import json
 import os
 from pathlib import Path
 import re
 import shlex
-import socket
-import stat
 import subprocess
 import sys
-
-
-OPTIONS = ['-q', '-T', '-x', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-           '-o', 'PreferredAuthentications=publickey', '-o', 'IdentitiesOnly=yes',
-           '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',
-           '-o', 'PermitLocalCommand=no', '-o', 'ProxyCommand=none', '-o', 'ProxyJump=none',
-           '-o', 'ControlPath=none', '-o', 'CanonicalizeHostname=no',
-           '-o', 'ServerAliveInterval=0', '-o', 'ConnectTimeout=5', '-o', 'ConnectionAttempts=1']
-NETWORKS = tuple(ipaddress.ip_network((address, bits)) for address, bits in (
-    ('127.0.0.0', 8), ('10.0.0.0', 8), ('172.16.0.0', 12),
-    ('192.168.0.0', 16), ('100.64.0.0', 10), ('::1', 128), ('fc00::', 7)))
 
 
 def endpoint(value):
@@ -32,61 +19,15 @@ def endpoint(value):
     return host, root
 
 
-def configuration():
-    path = Path(__file__).resolve().parent.parent / 'ssh_config'
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return []
-    # Native Windows mode bits cannot establish this POSIX ownership contract.
-    uid = os.getuid() if hasattr(os, 'getuid') else None
-    if uid is None or not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & 0o077:
-        raise ValueError('ssh_config must be an owned private regular file, without a symlink')
-    return ['-F', str(path)]
-
-
-def private_address(hostname, port):
-    addresses = []
-    for result in socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM):
-        address = ipaddress.ip_address(result[4][0])
-        address = getattr(address, 'ipv4_mapped', None) or address
-        if not any(address in network for network in NETWORKS):
-            raise ValueError('destination resolves outside private address ranges')
-        if address not in addresses:
-            addresses.append(address)
-    if not addresses:
-        raise ValueError('destination has no private address')
-    # Prefer IPv4 when both exist, including local SSH bound only on IPv4.
-    return str(next((address for address in addresses if address.version == 4), addresses[0]))
-
-
 def command(destination, remote):
-    if not destination or destination.startswith('-') or any(c.isspace() for c in destination):
-        raise ValueError('invalid SSH destination')
-    selected = configuration()
-    effective = subprocess.check_output(['ssh', *selected, '-G', *OPTIONS, destination], text=True)
-    config = {}
-    identities = []
-    for line in effective.splitlines():
-        key, _, value = line.partition(' ')
-        if key == 'identityfile':
-            identities.append(value)
-        else:
-            config[key] = value
-    hostname, port = config['hostname'], int(config['port'])
-    if not 0 < port < 65536:
-        raise ValueError('invalid SSH port')
-    address = private_address(hostname, port)
-    alias = config.get('hostkeyalias', hostname)
-    if alias == 'none':
-        alias = hostname
-    # Keep Host matching and owner-configured identities while pinning DNS to
-    # the checked address. HostKeyAlias retains the original known-host key.
-    identities = [part for identity in identities
-                  for part in ('-i', identity.replace('%h', hostname))]
-    user = ['-l', config['user']] if 'user' in config else []
-    return ['ssh', *selected, *OPTIONS, '-p', str(port), *user, '-o', 'HostName=' + address, '-o', 'HostKeyAlias=' + alias,
-            *identities, destination, remote]
+    arguments = ['bash', '-c', 'exec tailworker ssh-argv "$@"', '_', destination]
+    configuration = Path(__file__).resolve().parent.parent / 'ssh_config'
+    if configuration.exists() or configuration.is_symlink():
+        arguments += ['--config', str(configuration)]
+    argv = json.loads(subprocess.check_output(arguments, text=True))
+    if not isinstance(argv, list) or not argv or any(not isinstance(part, str) for part in argv):
+        raise ValueError('invalid private SSH argv')
+    return argv + [remote]
 
 
 if __name__ == '__main__':

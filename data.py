@@ -1,4 +1,3 @@
-from contextlib import closing
 import fcntl
 import hashlib
 import json
@@ -11,7 +10,6 @@ import subprocess
 import sys
 import time
 import tomllib
-import history
 
 
 def git(folder, *args):
@@ -38,9 +36,12 @@ def open_file(path, mode="r"):
     return os.fdopen(descriptor, mode, encoding="utf-8")
 
 
-def read_file(path, limit=-1):
+def read_file(path, limit=16 * 1024 * 1024):
     with open_file(path) as stream:
-        return stream.read(limit)
+        content = stream.read(limit + 1)
+        if len(content.encode()) > limit:
+            raise ValueError('file exceeds byte limit')
+        return content
 
 
 def write_file(path, content):
@@ -72,7 +73,7 @@ def host_config(root):
 
 def project_config(repository, commit="HEAD"):
     config = tomllib.loads(git(repository, "show", commit + ":ci-buddy.toml"))
-    allowed = {"name", "host", "main", "image", "prepare", "wrapper", "gate", "test", "bench"}
+    allowed = {"name", "main", "image", "prepare", "wrapper", "gate", "test", "bench"}
     if config.keys() - allowed:
         raise ValueError(f"unknown project settings: {config.keys() - allowed}")
     for name in ("test", "gate", "bench"):
@@ -82,13 +83,7 @@ def project_config(repository, commit="HEAD"):
     return config
 
 
-def output(out, job):
-    write_file(out / 'job.json', json.dumps(job))
-    for name in ('task', 'slot', 'exit', 'runner.log'):
-        write_file(out / name, '')
-
-
-def make_job(folder, run, kind, commit, base, branch, submitter, argv):
+def make_job(folder, kind, commit, base, branch, submitter, argv):
     config = project_config(Path(folder, "git"), commit)
     rerun = kind != "run" and argv[:1] == ["--rerun"]
     if rerun:
@@ -108,113 +103,26 @@ def make_job(folder, run, kind, commit, base, branch, submitter, argv):
         raise ValueError(f"{kind} requires its configured command and no arguments")
     job = dict(kind=kind, commit=commit, base=base, branch=branch, submitter=submitter,
                tree=git(Path(folder, "git"), "rev-parse", commit + "^{tree}"),
-               argv=argv, key="", rerun=rerun, queued_at=time.time(), exclusive=exclusive,
-               bench_required=kind == "gate" and "bench" in config)
+               argv=argv, key="", rerun=rerun, queued_at=time.time(),
+               steps=[dict(name="profiling" if kind == "bench" else "correctness",
+                           kind=kind, exclusive=exclusive, argv=argv)])
+    if kind == "gate" and "bench" in config:
+        job["steps"].append(dict(name="profiling", kind="bench", exclusive=True, argv=[]))
     if kind != "run":
         revision = read_file(Path(folder).parents[1] / "bin/revision").strip()
-        inputs = [kind, job["tree"], argv, base if kind == "test" and not argv else "", revision]
+        inputs = [kind, job["tree"], argv, exclusive, base if kind == "test" and not argv else "", revision]
         job["key"] = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
-    output(Path(folder, 'runs', run), job)
     return job
-
-
-def reuse_finished(folder, run):
-    out = folder / "runs" / run
-    job = json.loads(read_file(out / "job.json"))
-    if job["key"] and not job["rerun"]:
-        with closing(history.db(folder)) as database:
-            row = database.execute('SELECT * FROM runs WHERE key=? AND reused_from IS NULL AND exit IS NOT NULL ORDER BY id DESC LIMIT 1', (job["key"],)).fetchone()
-        if row is None:
-            return
-        prior = dict(row)
-        original = prior["id"]
-        prior.update(id=int(run), commit=job["commit"], branch=job["branch"], submitter=job["submitter"],
-                     queued_at=job["queued_at"], started_at=time.time(), ended_at=time.time(), cpu_s=0, peak_bytes=None, reused_from=original)
-        history.store(folder, prior)
-        job.update(reused_from=original, exit=prior["exit"], overall_exit=prior["exit"])
-        write_file(out / "job.json", json.dumps(job))
-        write_file(out / "exit", str(prior["exit"]))
-        previous = folder / "runs" / str(original) / "report.txt"
-        report = read_file(previous) if previous.exists() else json.dumps(prior)
-        write_file(out / "report.txt", f"reused_from={original}\n{report}")
-        return str(original)
-
-
-def gate_run(folder, commit):
-    for output in sorted(Path(folder, "runs").iterdir(), reverse=True):
-        path = output / "job.json"
-        try:
-            job = json.loads(read_file(path))
-        except FileNotFoundError:
-            continue
-        if job["kind"] == "gate" and job["commit"] == commit:
-            return path.parent.name
-    raise ValueError("no gate recorded for this commit")
-
-
-def record(output):
-    history.record(output.parents[1], output, read_file)
-    return (output.parents[1] / "history.sqlite").stat().st_size
-
-
-def report(output, prefix, *timing):
-    output = Path(output)
-    job = json.loads(read_file(output / "job.json"))
-    stage = prefix.replace("-", "_")
-    if not timing and stage + "started_at" not in job:
-        with open_file(output / "report.txt", "a") as report:
-            report.write(f"{prefix}runner ended before start; stats incomplete\n")
-        return
-    started, ended, status = timing if timing else (job[stage + "started_at"], time.time(), job.get(stage + 'exit', 137))
-    job[stage + "started_at"] = float(started)
-    job[stage + "ended_at"], job[stage + "exit"] = float(ended), int(status)
-    write_file(output / "job.json", json.dumps(job))
-    with open_file(output / "report.txt", "a") as report:
-        report.write(f"host_load={os.getloadavg()}\n")
-        if job["kind"] == "test" and (output / "all-tests.json").exists():
-            counts = []
-            for name in ("all-tests", "selected-tests"):
-                listing = json.loads(read_file(output / (name + ".json")))
-                counts.append(sum(not case["ignored"] and case["filter-match"]["status"] == "matches" for suite in listing["rust-suites"].values() for case in suite["testcases"].values()))
-            report.write(f"touched_packages={job['touched_packages']} selection={job['selection']} selected={counts[1]} total={counts[0]} scope=runnable\n")
-        queued = job["bench_queued_at" if prefix else "queued_at"]
-        report.write(f"{prefix}queue_s={float(started) - queued:.3f} run_s={float(ended) - float(started):.3f} exit={status}\n")
-        phases = job.get(stage + "phases", []) + [["end", float(ended)]]
-        for (name, begin), (_, end) in zip(phases, phases[1:]):
-            report.write(f"{prefix}{name}_s={end - begin:.3f}\n")
-        residual = float(ended) - float(started) - sum(b[1] - a[1] for a, b in zip(phases, phases[1:]))
-        report.write(f"{prefix}unaccounted_s={residual:.3f}\n")
-        totals = []
-        for name in (prefix + "fetch-stats", prefix + "prepare-stats", prefix + "stats"):
-            try:
-                values = dict(line.replace("=", " ").split() for line in read_file(output / name).splitlines())
-                totals.append({key: int(values[key]) for key in ("usage_usec", "memory_peak_bytes", "oom_kill")})
-            except FileNotFoundError:
-                pass
-            except (ValueError, KeyError):
-                report.write(f"{name} malformed; stats incomplete\n")
-        if totals:
-            report.write(f"cpu_s={sum(s['usage_usec'] for s in totals) / 1000000:.3f} peak_bytes={max(s['memory_peak_bytes'] for s in totals)} cap_killed={sum(s['oom_kill'] for s in totals)} scope=fetch+prepare+run peak_includes_file_cache=true\n")
-        expected = 3 if any(name == "prepare" for name, _ in phases) else 2
-        job[stage + "cpu_s"] = sum(s["usage_usec"] for s in totals) / 1000000 if len(totals) == expected else None
-        job[stage + "peak_bytes"] = max(s["memory_peak_bytes"] for s in totals) if len(totals) == expected else None
-        if len(totals) != expected:
-            report.write("stats incomplete\n")
-    write_file(output / "job.json", json.dumps(job))
 
 
 def main():
     command, *args = sys.argv[1:]
-    if command == "read":
-        sys.stdout.write(read_file(args[0]))
-    elif command == "write":
-        write_file(Path(args[0]), args[1] + "\n")
-    elif command == "host":
+    if command == "host":
         config = host_config(Path(args[0]))
         emit({key: config[key] for key in ("jobs", "slots", "memory", "cpus", "min_free_gb", "slot_max_gb", "keep_days")})
     elif command == "affected":
-        output, repository = map(Path, args)
-        job = json.loads(read_file(output / "job.json"))
+        path, output, repository = map(Path, args)
+        job = json.loads(read_file(path))
         metadata = json.loads(read_file(output / "metadata.json"))
         packages = [(Path(p["manifest_path"]).relative_to("/work/src").parent, p["name"]) for p in metadata["packages"]]
         changed = list(filter(None, git(repository, "diff", "--name-only", "--no-renames", "-z", job["base"], job["commit"]).split("\0")))
@@ -227,24 +135,26 @@ def main():
                 touched.add(max(owners)[1])
         expression = "all()" if shared or not touched else " + ".join("rdeps(=" + name + ")" for name in sorted(touched))
         job["touched_packages"], job["selection"] = sorted(touched), expression if not job["argv"] else "explicit"
-        write_file(output / "job.json", json.dumps(job))
-        emit(dict(affected=expression if not job["argv"] else ""))
-    elif command == "load":
-        job = json.loads(read_file(Path(args[0], "job.json")))
-        kind = args[1] or job["kind"]
-        values = {key: job[key] for key in ("commit", "base")}
-        values.update(kind=kind, exclusive=job["exclusive"] or kind == "bench")
-        emit(values)
-        print("argv=(" + shlex.join(job["argv"]) + ")")
-    elif command == "stamp":
-        path = Path(args[0], "job.json")
-        job = json.loads(read_file(path))
-        job[args[1]] = (int if args[1].endswith("exit") else float)(args[2])
         write_file(path, json.dumps(job))
-    elif command == "phase":
-        path = Path(args[0], "job.json")
+        emit(dict(affected=expression if not job["argv"] else ""))
+    elif command in ("load", "stamp", "finish", "phase", "slot"):
+        path = Path(args[0])
         job = json.loads(read_file(path))
-        job.setdefault(args[1] + "phases", []).append([args[2], time.time()])
+        if command == "slot":
+            job["slot"] = int(args[1])
+        else:
+            step = job["steps"][int(args[1])]
+            if command == "load":
+                emit(dict(commit=job["commit"], base=job["base"], **{key: step[key] for key in ("name", "kind", "exclusive")}))
+                print("argv=(" + shlex.join(step["argv"]) + ")")
+                print("chosen=" + str(job.get("slot", "")))
+                return
+            if command == "finish":
+                step.update(ended_at=float(args[2]), exit=int(args[3]))
+            elif command == "phase":
+                step.setdefault("phases", []).append([args[2], time.time()])
+            else:
+                step[args[2]] = (int if args[2] == "exit" else float)(args[3])
         write_file(path, json.dumps(job))
     elif command == "admit":
         busy = []
@@ -295,8 +205,6 @@ def main():
         shutil.copytree(repository, view)
         for key, value in (("core.bare", "false"), ("core.worktree", "/work/src")):
             subprocess.run(["git", "--git-dir", str(view), "config", key, value], check=True)
-    elif command == "report":
-        report(*args)
 
 
 if __name__ == "__main__":

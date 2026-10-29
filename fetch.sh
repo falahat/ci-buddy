@@ -2,7 +2,7 @@
 set -euo pipefail
 # Neither Python imports nor Cargo config discovery may start in project code.
 cd /tmp
-exec python3 -I - "${1:-}" <<'PY'
+exec python3 -I - <<'PY'
 import os
 from pathlib import Path
 import subprocess
@@ -10,9 +10,6 @@ import sys
 import tarfile
 import tempfile
 
-prefix = sys.argv[1]
-if prefix not in ('', 'bench-'):
-    raise SystemExit('invalid fetch prefix')
 env = {key: os.environ[key] for key in ('PATH', 'RUSTUP_HOME')}
 env.update(HOME='/tmp', CARGO_HOME='/work/cargo', RUSTUP_TOOLCHAIN='1.99.0',
     CARGO_NET_GIT_FETCH_WITH_CLI='true', CARGO_NET_RETRY='0', GIT_TERMINAL_PROMPT='0',
@@ -83,5 +80,5 @@ finally:
     stats = Path('/sys/fs/cgroup/cpu.stat').read_text()
     stats += 'memory_peak_bytes=' + Path('/sys/fs/cgroup/memory.peak').read_text()
     stats += Path('/sys/fs/cgroup/memory.events').read_text()
-    Path('/work/out', prefix + 'fetch-stats').write_text(stats)
+    Path('/work/step/fetch-stats').write_text(stats)
 PY

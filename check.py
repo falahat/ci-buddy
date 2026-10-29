@@ -20,6 +20,7 @@ for name in filter(None, names):
         line = re.sub(r"</[A-Za-z_][A-Za-z0-9_:-]*>", "", line)
         # These single-character Bash substitutions cannot name a root.
         line = re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*//[-_]/[-_]\}", "", line)
+        line = re.sub(r"(?<=-perm )/[0-7]{3}\b", "", line)
         assert not drive.search(line) and not unc.search(line), (name, number, "absolute Windows path")
         for match in absolute.finditer(line):
             # Documentation's root placeholder names a caller-supplied path.

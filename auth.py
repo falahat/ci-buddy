@@ -51,13 +51,12 @@ def rpc(endpoint, mode, token=b''):
     subprocess.run(argv, input=token, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
-def distribute(token, endpoints, mode, announce=False):
+def install(root, token):
+    store(root, token)
     failed = False
-    for endpoint in dict.fromkeys(endpoints):
+    for endpoint in dict.fromkeys(tomllib.loads((root / 'host.conf').read_text())['fetch_hosts']):
         try:
-            rpc(endpoint, mode, token)
-            if announce:
-                print('credentials installed: ' + endpoint)
+            rpc(endpoint, 'store', token)
         except (OSError, ValueError, subprocess.CalledProcessError):
             print('credential unavailable: ' + endpoint, file=sys.stderr)
             failed = True
@@ -65,18 +64,17 @@ def distribute(token, endpoints, mode, announce=False):
         raise ValueError('incomplete distribution; run ci-buddy auth again before enabling unavailable fetch hosts')
 
 
-def install(root, token):
-    store(root, token)
-    distribute(token, tomllib.loads((root / 'host.conf').read_text())['fetch_hosts'], 'store')
-
-
 def client(arguments):
     if arguments:
-        raise ValueError('auth takes no destinations; configure the approved host pool first')
+        raise ValueError('auth takes no destinations; configure the coordinator first')
     endpoints = subprocess.check_output(['git', 'config', '--global', '--get-all', 'ci-buddy.host']).decode().splitlines()
+    if len(endpoints) != 1:
+        raise ValueError('configure exactly one coordinator')
+    ssh.endpoint(endpoints[0])
     warnings.simplefilter('error', getpass.GetPassWarning)
     token = validate(getpass.getpass('GitHub token (selected repositories, Contents: read-only): ').encode())
-    distribute(token, endpoints, 'install', announce=True)
+    rpc(endpoints[0], 'install', token)
+    print('credentials installed: ' + endpoints[0])
 
 
 if __name__ == '__main__':

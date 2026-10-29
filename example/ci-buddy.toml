@@ -1,5 +1,4 @@
 name = "example"
-host = ""
 main = "main"
 image = ["Containerfile"]
 test = "cargo nextest run --profile ci --workspace --locked --no-tests fail"

@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import os
+import re
 import shutil
 import shlex
 import subprocess
@@ -27,15 +28,13 @@ sys.stdout.reconfigure(encoding="utf-8")
 with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
     assert Path(directory).resolve().parent == Path(tempfile.gettempdir()).resolve()
     os.environ['GIT_CONFIG_GLOBAL'] = str(Path(directory, 'gitconfig'))
-    for allowed in (endpoint,):
-        subprocess.run(['git', 'config', '--global', '--add', 'ci-buddy.host', allowed], check=True)
+    subprocess.run(['git', 'config', '--global', 'ci-buddy.host', endpoint], check=True)
     source = Path(directory, "example")
     shutil.copytree(root / "example", source)
     # Earlier invocations must not satisfy this invocation's cache-miss assertions.
     with (source / "arithmetic/src/lib.rs").open("a", encoding="utf-8") as stream:
         stream.write("\n// E2E candidate " + Path(directory).name + ".\n")
     config = source / "ci-buddy.toml"
-    config.write_text(config.read_text().replace('host = ""', "host = " + json.dumps(endpoint)))
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=source, check=True)
     subprocess.run(["git", "add", "."], cwd=source, check=True)
     subprocess.run(author + ["commit", "-qm", "example"], cwd=source, check=True)
@@ -46,9 +45,7 @@ with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
         print(result.stdout, end="", flush=True)
         assert result.returncode == status, (arguments, result.returncode, status)
         if arguments[0] in ("history", "status"):
-            owner = tomllib.loads(config.read_text())["host"]
-            payload = result.stdout.split("host=" + owner + "\n", 1)[1]
-            return json.dumps(json.JSONDecoder().raw_decode(payload.lstrip())[0])
+            return json.dumps(json.JSONDecoder().raw_decode(result.stdout.lstrip())[0])
         return result.stdout
 
     def launch(*arguments):
@@ -63,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix="ci-buddy-example-") as directory:
                 run = line.split()[0].split("=", 1)[1]
             if line.strip() == marker or marker is None and run is not None:
                 break
-        assert run is not None and run.isdecimal(), run
+        assert run is not None and re.fullmatch(r'j_[0-9A-HJKMNP-TV-Z]{26}', run), run
         return run
 
     probe = """import fcntl,json,subprocess,sys,tomllib
@@ -79,7 +76,7 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
                                        encoding="utf-8")
 
     def worker_probe(action, run):
-        script = probe.replace("/ 'runs' /", "/ 'executions' /")
+        script = probe + "work = root / 'dispatch/work' / sys.argv[2]\nout = work / 'artifacts/out'\n"
         return subprocess.check_output(administer(worker_destination, ["python3", "-c", script + action, worker_root, run]),
                                        encoding="utf-8")
 
@@ -132,23 +129,29 @@ out = project / 'runs' / sys.argv[2] if sys.argv[2] else project
     try:
         assert running.poll() is None
         assert run in call("status")
-        mode = subprocess.check_output(administer(worker_destination, ["podman", "inspect", "--format",
-                                        "{{.HostConfig.NetworkMode}}", "ci-buddy-" + run]), encoding="utf-8")
-        assert mode.strip() == "none", mode
+        container = json.loads(subprocess.check_output(administer(worker_destination,
+            ["podman", "inspect", "ci-buddy-" + run]), encoding="utf-8"))[0]
+        assert container['HostConfig']['NetworkMode'] == 'none', container
+        slot = next(mount['Source'] for mount in container['Mounts'] if mount['Destination'] == '/work/src').removesuffix('/src')
     finally:
         if running.poll() is None:
             call("cancel", run)
         running.communicate()
     assert running.returncode != 0
     call("cancel", run)
-    worker_probe("""slot = (out / 'slot').read_text().strip()
-with (project / 'slots' / slot / 'lock').open('r+') as lock:
-    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)""", run)
+    worker_probe("with Path(" + repr(slot + '/lock') + ").open('r+') as lock:\n    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)", run)
     call("run", "--", "printf", "slot-released\\n")
 
     # A rejected output link must leave the host-side data canary unchanged.
-    call("run", "--exclusive", "--", "sh", "-c",
-         'printf readable >"$CI_BUDDY_DATA/probe"; ln -s ../../data/probe "$CI_BUDDY_OUT/report.txt"', status=1)
+    rejected = run_id(call("run", "--exclusive", "--", "sh", "-c",
+         'printf readable >"$CI_BUDDY_DATA/probe"; ln -s ../../../../../projects/example/data/probe "$CI_BUDDY_OUT/report.txt"', status=1))
+    run_probe("""sys.path.insert(0,str(root/'bin'))
+import control
+with control.client(root) as queue:
+    view = queue.job(sys.argv[2])
+assert view['state'] == 'FAILED' and view.get('reason')
+assert not (out/'result.json').exists()
+assert control.history.run(project,sys.argv[2])['exit'] is None""", rejected)
     call("run", "--", "sh", "-c",
          '! printf wrong >"$CI_BUDDY_DATA/probe"; test "$(cat "$CI_BUDDY_DATA/probe")" = readable')
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
@@ -156,9 +159,8 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
     run = announced(gate, "correctness_exit=0")
     try:
         assert gate.poll() is None, 'gate returned before profiling completed'
-        task = run_probe("print((out / 'task').read_text())", run).strip()
-        assert any(row['job_id'] == task and row['state'] == 'RUNNING' and row.get('progress') == dict(phase='profiling', correctness_exit=0) for row in json.loads(call('status'))['jobs'])
-        worker_probe("job = json.loads((out / 'job.json').read_text())\nassert job['exit'] == 0 and 'bench_exit' not in job\n(out / 'release').write_text('release')", run)
+        assert any(row['job_id'] == run and row['state'] == 'RUNNING' and row.get('progress') == dict(phase='profiling', correctness_exit=0) for row in json.loads(call('status'))['jobs'])
+        worker_probe("job = json.loads((work / 'job.json').read_text())\nassert job['steps'][0]['exit'] == 0 and job.get('exit') is None\n(out / 'release').write_text('release')", run)
         gate.communicate()
     finally:
         if gate.poll() is None:
@@ -171,7 +173,7 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
     subprocess.run(author + ["commit", "-qam", "red gate"], cwd=source, check=True)
     red = call("gate", status=1)
     run = run_id(red)
-    run_probe("job = json.loads((out / 'job.json').read_text())\nassert job['exit'] == 1 and job['overall_exit'] == 1 and 'bench_exit' not in job", run)
+    run_probe("job = json.loads((out / 'job.json').read_text())\nassert job['exit'] == 1 and len(job['steps']) == 1 and job['steps'][0]['exit'] == 1", run)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
     call("verify", commit, status=1)
     assert "reused_from=" not in call("test"), "changed tree reused an old result"
@@ -193,20 +195,18 @@ with (project / 'slots' / slot / 'lock').open('r+') as lock:
         run_probe("""sys.path.insert(0,str(root/'bin'))
 import control
 with control.client(root) as queue:
-    view = queue.job((out/'task').read_text().strip())
-    assert view['state'] == 'QUEUED'
-spec = control.invocation(root, address=view['invocation_address'])
-control.results.cas(root, 'get', spec['inputs']['source']['address'], out/'bundle')
-assert subprocess.run(['git','-C',str(project/'git'),'bundle','verify',str(out/'bundle')]).returncode == 0
-(out/'bundle').unlink()
-assert not (out / 'slot').read_text().strip(), 'job fetched before cancellation'
-assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify','--quiet',
-                       'refs/ci-buddy/'+sys.argv[2]]).returncode == 1""", queued_run)
+    view = queue.job(sys.argv[2])
+    assert view['state'] == 'QUEUED' and not view.get('runner_id')
+spec = control.blob(root, address=view['invocation_address'])
+bundle = root / 'containers' / (sys.argv[2] + '.bundle')
+control.results.cas(root, 'get', spec['inputs']['source']['address'], bundle)
+assert subprocess.run(['git','-C',str(project/'git'),'bundle','verify',str(bundle)]).returncode == 0
+bundle.unlink()""", queued_run)
+        assert refs() == baseline_refs, 'queued submission retained source refs'
         call("cancel", queued_run)
         queued.communicate()
-        assert queued.returncode == 137, queued.returncode
-        run_probe("""assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify','--quiet',
-                       'refs/ci-buddy/'+sys.argv[2]]).returncode == 1""", queued_run)
+        assert queued.returncode == 1, queued.returncode
+        assert refs() == baseline_refs, 'cancelled submission retained source refs'
         with (source / "arithmetic/src/lib.rs").open("a", encoding="utf-8") as stream:
             stream.write("\n// Reuse control " + Path(directory).name + ".\n")
         subprocess.run(author + ["commit", "-qam", "reuse control"], cwd=source, check=True)
@@ -237,21 +237,19 @@ assert subprocess.run(['git','--git-dir',str(project/'git'),'show-ref','--verify
         worker = call("test", "--rerun", "-E", "package(=consumer)")
         run = run_id(worker)
         run_probe("assert json.loads((out / 'job.json').read_text())['node']", run)
-        worker_probe("assert (out / 'job.json').is_file()", run)
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, encoding="utf-8").strip()
         answer = json.loads(call("history", "change", commit))["answer"]
         assert answer, "worker result did not return to the coordinator history"
         readonly = """import errno,os,sys
 from pathlib import Path
 print('worker-exit-three-once',flush=True)
-for name in ('job.json','task','slot','exit'):
-    try:
-        descriptor = os.open(Path(os.environ['CI_BUDDY_OUT']) / name, os.O_WRONLY)
-    except OSError as error:
-        assert error.errno == errno.EROFS, (name,error)
-    else:
-        os.close(descriptor)
-        raise AssertionError('writable control: ' + name)
+try:
+    descriptor = os.open(Path(os.environ['CI_BUDDY_OUT']) / 'job.json', os.O_WRONLY)
+except OSError as error:
+    assert error.errno == errno.EROFS, error
+else:
+    os.close(descriptor)
+    raise AssertionError('writable job metadata')
 sys.exit(3)"""
         result = call("run", "--", "python3", "-c", readonly, status=3)
         assert result.count('worker-exit-three-once') == 1, result

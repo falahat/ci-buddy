@@ -1,29 +1,22 @@
 set -euo pipefail
-root=$1 project=$2 run=$3 out=$5
+root=$1 project=$2 run=$3 job=$4 index=$5 artifacts=$6
 export PATH="$root/bin:$PATH"
 export TMPDIR="$root/containers"
 folder=$root/projects/$project
-trap 'git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"' EXIT
-write_field() { python3 "$root/bin/data.py" write "$out/$1" "$2"; }
-phase() { python3 "$root/bin/data.py" phase "$out" "${prefix//-/_}" "$1"; }
-prefix=""; [[ ${4:-} != bench ]] || prefix=bench-
+phase() { python3 "$root/bin/data.py" phase "$job" "$index" "$1"; }
 values=$(python3 "$root/bin/data.py" host "$root"); eval "$values"
-values=$(python3 "$root/bin/data.py" load "$out" "${4:-}"); eval "$values"
+values=$(python3 "$root/bin/data.py" load "$job" "$index"); eval "$values"
+out=$artifacts/out step_out=$artifacts/steps/$name
+mkdir -p "$out" "$step_out"
 free=$(df --output=avail -B1 "$root" | tail -1)
 ((free >= min_free_gb * 1000000000)) || { echo "disk below ${min_free_gb} GB floor"; exit 2; }
 exec 8>&1
-exec > >(tee -a "$out/${prefix}runner.log") 2>&1
+exec > >(tee -a "$step_out/runner.log") 2>&1
 logger=$!
 started=$EPOCHREALTIME
-started_field=started_at; [[ -z $prefix ]] || started_field=bench_started_at
 finish() {
     status=$?
-    git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
-    python3 "$root/bin/data.py" report "$out" "$prefix" "$started" "$EPOCHREALTIME" "$status" || {
-        status=1
-        python3 "$root/bin/data.py" stamp "$out" "${prefix//-/_}exit" "$status"
-    }
-    python3 "$root/bin/data.py" read "$out/report.txt" || true
+    python3 "$root/bin/data.py" finish "$job" "$index" "$EPOCHREALTIME" "$status"
     exec 1>&8 2>&8
     wait "$logger"
 }
@@ -39,9 +32,9 @@ if [[ $exclusive != True ]]; then
         flock -u 7
     fi
 fi
-if [[ -n $prefix ]]; then
-    order=$(python3 "$root/bin/data.py" read "$out/slot")
-    [[ $order =~ ^[1-9][0-9]*$ ]] && ((order <= slots)) || { echo "invalid correctness slot"; exit 1; }
+if [[ -n $chosen ]]; then
+    order=$chosen
+    [[ $order =~ ^[1-9][0-9]*$ ]] && ((order <= slots)) || { echo "invalid selected slot"; exit 1; }
 else
     order=$(python3 "$root/bin/data.py" slots "$folder/git" "$commit" "$slots")
 fi
@@ -54,14 +47,14 @@ done
 if [[ -z $chosen ]]; then read -r chosen _ <<<"$order"; exec 3>"$folder/slots/$chosen/lock"; flock 3; fi
 slot=$folder/slots/$chosen
 flock -u 5
-write_field slot "$chosen"
+python3 "$root/bin/data.py" slot "$job" "$chosen"
 echo "slot=$chosen commit=$commit"
 exec 6>"$root/turnstile" 4>"$root/machine.lock"
 lock_mode=-s; [[ $exclusive != True ]] || lock_mode=-x
 # An exclusive waiter holds the turnstile while shared holders drain; newcomers wait.
 flock -x 6; flock "$lock_mode" 4; flock -u 6
 started=$EPOCHREALTIME
-python3 "$root/bin/data.py" stamp "$out" "$started_field" "$started"
+python3 "$root/bin/data.py" stamp "$job" "$index" started_at "$started"
 phase checkout
 mkdir -p "$slot/src"
 [[ -d $slot/git ]] || git clone --quiet --bare "$folder/git" "$slot/git"
@@ -73,7 +66,6 @@ repository=(git -c "core.hooksPath=$root/bin" -c core.fsmonitor=false -c gc.auto
 git -C "$folder/git" update-ref "refs/slots/$chosen" "$commit"
 "${repository[@]}" update-ref refs/remotes/origin/main "$base"
 python3 "$root/bin/data.py" git-view "$slot/git" "$slot/src/.git"
-git -C "$folder/git" update-ref -d "refs/ci-buddy/$run"
 mkdir -p "$root/cargo"/{registry,git} "$root/sccache" "$slot/context"
 phase image
 values=$(python3 "$root/bin/data.py" image "$slot/src" "$slot/context" "$project" "$slot/git"); eval "$values"
@@ -97,15 +89,10 @@ if ! podman image exists "$fetch_image"; then
 fi
 flock -u 7
 common=(--rm --init --hostname "$(hostname)" --memory="$memory" --memory-swap="$memory" --pids-limit=8192
-    -v "$out:/work/out"
+    -v "$out:/work/out" -v "$step_out:/work/step" -v "$job:/work/out/job.json:ro"
     -e CARGO_HOME=/work/cargo -e RUSTC_WRAPPER=sccache -e SCCACHE_DIR=/work/sccache
     -e "CI_BUDDY_PROJECT=$project" -e "CI_BUDDY_RUN=$run" -e "CI_BUDDY_KIND=$kind"
     -e "CI_BUDDY_COMMIT=$commit" -e "CI_BUDDY_BASE=$base" -e CI_BUDDY_OUT=/work/out -e CI_BUDDY_DATA=/work/data)
-# data.py creates and validates these controls before enqueue; every project
-# container receives read-only file mounts and cannot replace them.
-for control in job.json task slot exit; do
-    common+=(-v "$out/$control:/work/out/$control:ro")
-done
 project_mounts=(-v "$slot/src:/work/src" -v "$root/sccache:/work/sccache" -w /work/src)
 # Podman inherits descriptors 3 (slot) and 4 (machine). Its processes keep the
 # flock descriptions alive even if the host runner dies; every step inherits both.
@@ -121,7 +108,7 @@ podman run "${common[@]}" "${token[@]}" --name "ci-buddy-fetch-$run" --preserve-
     -v "$root/cargo/.package-cache:/work/cargo/.package-cache" -v "$root/cargo/.package-cache-mutate:/work/cargo/.package-cache-mutate" \
     -v "$folder/secrets:/run/secrets:ro" \
     -e GIT_CONFIG_GLOBAL=/run/secrets/gitconfig -e 'GIT_SSH_COMMAND=ssh -F /run/secrets/ssh/config' \
-    -e CARGO_NET_GIT_FETCH_WITH_CLI=true --entrypoint bash "$fetch_image" /work/fetch.sh "$prefix"
+    -e CARGO_NET_GIT_FETCH_WITH_CLI=true --entrypoint bash "$fetch_image" /work/fetch.sh
 limits=(); [[ -z $cpus ]] || limits=(--cpus "$cpus")
 [[ ! -f $root/sccache.env ]] || limits+=(--env-file "$root/sccache.env")
 dependencies=(-v "$root/cargo/registry:/work/cargo/registry:ro" -v "$root/cargo/git:/work/cargo/git:ro")
@@ -130,12 +117,12 @@ if [[ -n $prepare ]]; then
     podman run "${common[@]}" "${limits[@]}" --name "ci-buddy-prepare-$run" --preserve-fds=2 \
         "${project_mounts[@]}" "${dependencies[@]}" -v "$folder/data:/work/data" "$image" sh -c '
         eval "$1"; status=$?
-        { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${2}prepare-stats"
-        exit "$status"' prepare "$prepare" "$prefix"
+        { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > /work/step/prepare-stats
+        exit "$status"' prepare "$prepare"
 fi
 case $kind in
     test)
-        values=$(python3 "$root/bin/data.py" affected "$out" "$slot/git"); eval "$values"
+        values=$(python3 "$root/bin/data.py" affected "$job" "$out" "$slot/git"); eval "$values"
         argv=(bash -c '
             command=$1; affected=$2; shift 2
             listing=${command/nextest run/nextest list}
@@ -153,7 +140,7 @@ if [[ $exclusive == True ]]; then limits+=(--security-opt seccomp=unconfined); d
 phase command
 podman run "${common[@]}" "${limits[@]}" --name "ci-buddy-$run" --network=none --preserve-fds=2 "${dependencies[@]}" \
     "${project_mounts[@]}" -v "$folder/data:/work/data:$data_mode" -e CARGO_NET_OFFLINE=true "$image" sh -c '
-    wrapper=$1; stats=$2; shift 2
+    wrapper=$1; shift
     if [ -n "$wrapper" ]; then eval "set -- $wrapper \"\$@\""; fi
     "$@"; status=$?
     # Copy only reports written by this command, while still inside its container.
@@ -161,8 +148,8 @@ podman run "${common[@]}" "${limits[@]}" --name "ci-buddy-$run" --network=none -
         junit=$profile/junit.xml
         [ -f "$junit" ] && [ "$junit" -nt /work/out/job.json ] || continue
         profile=${profile##*/}
-        mkdir -p "/work/out/junit/$profile"
-        cp -p "$junit" "/work/out/junit/$profile/junit.xml" || exit 1
+        mkdir -p "/work/step/junit/$profile"
+        cp -p "$junit" "/work/step/junit/$profile/junit.xml" || exit 1
     done
-    { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > "/work/out/${stats}stats"
-    exit "$status"' run "$wrapper" "$prefix" "${argv[@]}"
+    { cat /sys/fs/cgroup/cpu.stat; echo memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak); cat /sys/fs/cgroup/memory.events; } > /work/step/stats
+    exit "$status"' run "$wrapper" "${argv[@]}"
